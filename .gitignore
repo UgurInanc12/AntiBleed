@@ -1,0 +1,81 @@
+# Xcode
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcworkspace/contents.xcworkspacedata
+**/xcshareddata/WorkspaceSettings.xcsettings
+xcuserdata/
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift / SPM
+.build/
+.swiftpm/
+Package.resolved
+
+# C++ / CMake
+build/
+out/
+cmake-build-*/
+*.o
+*.a
+*.dylib
+*.so
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# WebRTC
+webrtc-checkout/
+webrtc-build/
+depot_tools/
+
+# Audio driver
+*.driver/
+AntiBleed.driver/
+
+# BlackHole (dev only, never committed)
+BlackHole/
+
+# Python (offline harness)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node (if any tooling)
+node_modules/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Secrets & signing
+*.p12
+*.mobileprovision
+*.pem
+provisioning/
+secrets/
+.env
+.env.local
+
+# Logs & debug dumps
+*.log
+debug-dumps/
+*.wav
+*.aiff
+
+# IDE
+.vscode/
+.idea/
+*.xcuserstate
