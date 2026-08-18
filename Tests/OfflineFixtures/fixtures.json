@@ -1,0 +1,9 @@
+{
+  "sample_rate": 48000,
+  "frame_size": 480,
+  "cases": [
+    {"id": "A_fixed_echo", "delay_samples": 5, "gain": 0.5},
+    {"id": "B_delay_sweep", "delays": [0, 48, 240, 480, 1200]},
+    {"id": "H_no_coupling", "description": "render uncorrelated with mic - output must equal raw mic"}
+  ]
+}

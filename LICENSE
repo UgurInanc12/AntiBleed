@@ -1,0 +1,7 @@
+Anti-Bleed_mic - License TBD
+
+Copyright (c) 2026 Anti-Bleed_mic
+
+License decision pending before public release.
+Note: BlackHole (if used as Phase 6 dev dependency) is GPL-3.0 and must not be
+copied into a proprietary release without resolving licensing (see PLAN 16.1).

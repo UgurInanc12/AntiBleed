@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>com.antibleed.app</string>
+    <key>CFBundleName</key><string>Anti-Bleed</string>
+    <key>CFBundleDisplayName</key><string>Anti-Bleed</string>
+    <key>CFBundleVersion</key><string>0.1.0</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>LSMinimumSystemVersion</key><string>14.2</string>
+    <key>LSUIElement</key><true/>
+    <key>NSMicrophoneUsageDescription</key><string>Anti-Bleed needs microphone access to create the cleaned virtual microphone.</string>
+    <key>NSAudioCaptureUsageDescription</key><string>Anti-Bleed reads the audio sent to your output device locally so it can remove speaker bleed from your microphone.</string>
+</dict>
+</plist>

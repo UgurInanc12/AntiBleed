@@ -1,0 +1,4 @@
+# Offline harness deps - install into hermes venv or local .venv
+numpy>=1.26
+scipy>=1.10
+pytest>=8.0

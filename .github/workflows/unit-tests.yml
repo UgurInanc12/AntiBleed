@@ -1,0 +1,26 @@
+name: Unit Tests (cross-platform)
+on: [push, pull_request]
+jobs:
+  dsp-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Python deps
+        run: |
+          if [ -f "Tests/requirements.txt" ]; then pip install -r Tests/requirements.txt; fi
+      - name: Python offline harness
+        run: |
+          if [ -d "Tests" ]; then python -m pytest Tests/ -v; else echo "No Tests/ yet"; fi
+      - name: C++ DSP tests (if CMake available)
+        run: |
+          if [ -f "DSP/CMakeLists.txt" ]; then
+            cmake -S DSP -B build/dsp -DDSP_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+            cmake --build build/dsp
+            ctest --test-dir build/dsp --output-on-failure
+          else
+            echo "No DSP/CMakeLists.txt yet (Phase 0 stub)"
+          fi

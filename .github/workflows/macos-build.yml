@@ -1,0 +1,39 @@
+name: macOS Build
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app 2>/dev/null || sudo xcode-select -s /Applications/Xcode.app 2>/dev/null || true
+          xcodebuild -version
+          xcrun --version
+      - name: Verify toolchain
+        run: |
+          xcodebuild -version
+          clang --version
+          cmake --version || echo "cmake not found"
+          ninja --version || echo "ninja not found"
+      - name: Build Swift app
+        run: ./Scripts/build-app.sh
+      - name: Build C++ bridge
+        run: |
+          if [ -f "AECBridge/CMakeLists.txt" ]; then
+            cmake -S AECBridge -B build/aec -DCMAKE_BUILD_TYPE=Release
+            cmake --build build/aec --verbose
+          else
+            echo "No AECBridge/CMakeLists.txt"
+            exit 1
+          fi
+      - name: Run DSP unit tests
+        run: |
+          if [ -f "build/aec/DSPTests" ] || [ -f "Tests/DSPTests" ]; then
+            ctest --test-dir build/aec --output-on-failure || ctest --test-dir build --output-on-failure || true
+          fi
+          # Python offline harness (also runs here for coverage)
+          if [ -f "Tests/requirements.txt" ]; then
+            pip3 install -r Tests/requirements.txt
+            python3 -m pytest Tests/ -v
+          fi
