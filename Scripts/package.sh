@@ -22,6 +22,7 @@ cp -R "${DRIVER}" "${APP}/Contents/Library/Audio/Plug-Ins/HAL/"
 mkdir -p "${APP}/Contents/Resources/licenses"
 cp -R build/webrtc/licenses/. "${APP}/Contents/Resources/licenses/" 2>/dev/null || true
 cp LICENSE "${APP}/Contents/Resources/licenses/AntiBleed-LICENSE"
+cp NOTICE "${APP}/Contents/Resources/licenses/AntiBleed-NOTICE"
 
 if [ -n "${DEVELOPER_ID:-}" ]; then
   echo "[package] signing with ${DEVELOPER_ID}"

@@ -129,3 +129,9 @@ Newest decision at the bottom. Never delete entries; supersede with a new one.
 - Context: A per-frame full-band correlation over 480 samples could not see acoustic delays beyond 5 ms and scored 0.2 on a real 45 ms echo path.
 - Decision: The detector keeps a 650 ms history decimated 8x (6 kHz), correlates a 400 ms window over 0 to 250 ms of lag (1 ms steps), narrows to +-15 ms around the AEC3 delay estimate once available, and weights correlation 0.45, ERLE 0.35, lag stability 0.20, multiplied by AEC health. Evaluated every 100 ms.
 - Consequence: Measured 0.94 correlation at the true 45 ms lag with score 1.0 on the coupled case and score 0.0 on the headphones case, using the real AEC3 output statistics. Swift and Python mirrors must stay in sync (`AntiBleedApp/Core/CouplingDetector.swift`, `Tests/dsp/coupling_detector.py`).
+
+## D-019: License
+
+- Status: ACCEPTED
+- Decision: Anti-Bleed_mic is released under Apache-2.0 (Copyright 2026 Ugur Inanc). Third-party notices in NOTICE. No GPL code is present (BlackHole was never used, D-010).
+- Consequence: `Scripts/package.sh` ships LICENSE, NOTICE and the WebRTC/abseil license texts inside the app bundle.

@@ -1,0 +1,11 @@
+Anti-Bleed_mic
+Copyright 2026 Ugur Inanc
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party components (built, not vendored; see Scripts/build-webrtc.sh):
+- webrtc-audio-processing (PulseAudio packaging of WebRTC Audio Processing Module),
+  BSD-3-Clause, https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing
+- WebRTC, BSD-3-Clause + PATENTS grant, https://webrtc.googlesource.com/src
+- Abseil, Apache-2.0, https://github.com/abseil/abseil-cpp
+Their license texts are staged into build/webrtc/licenses and shipped in the app bundle.

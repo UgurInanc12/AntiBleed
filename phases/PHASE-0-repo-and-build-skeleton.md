@@ -42,7 +42,7 @@ Create exactly this tree - empty files/stubs are acceptable in Phase 0, but the 
 AntiBleed/
 ├── README.md
 ├── ANTI_BLEED_MIC_PLAN.md
-├── LICENSE                          # TBD - decide before public release; see D-010 re BlackHole GPL
+├── LICENSE                          # Apache-2.0 (D-019)
 ├── .gitignore
 ├── .github/
 │   └── workflows/
