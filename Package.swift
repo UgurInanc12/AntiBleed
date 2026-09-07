@@ -52,6 +52,13 @@ targets.append(contentsOf: [
             .linkedFramework("AudioToolbox"),
             .linkedFramework("AVFoundation"),
             .linkedFramework("AppKit"),
+            .linkedLibrary("c++"),
+            // abseil archives that the APM depends on (staged by Scripts/build-webrtc.sh)
+            .linkedLibrary("absl_base"), .linkedLibrary("absl_strings"), .linkedLibrary("absl_numeric"),
+            .linkedLibrary("absl_synchronization"), .linkedLibrary("absl_types"), .linkedLibrary("absl_time"),
+            .linkedLibrary("absl_log"), .linkedLibrary("absl_container"), .linkedLibrary("absl_hash"),
+            .linkedLibrary("absl_debugging"), .linkedLibrary("absl_profiling"), .linkedLibrary("absl_status"),
+            .linkedLibrary("absl_random"), .linkedLibrary("absl_crc"), .linkedLibrary("absl_flags"),
             .unsafeFlags(["-L", "build/aec", "-L", "build/webrtc/lib"]),
         ]
     ),
