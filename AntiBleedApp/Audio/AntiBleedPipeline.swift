@@ -34,6 +34,7 @@ public final class AntiBleedPipeline {
         public var engineName = ""
         public var lastError: String?
         public var running = false
+        public init() {}
     }
 
     public let engine: AntiBleedEngine

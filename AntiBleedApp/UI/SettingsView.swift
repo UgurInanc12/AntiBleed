@@ -6,6 +6,10 @@ struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
+    private var appVersion: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev"
+    }
+
     var body: some View {
         Form {
             Section("General") {
@@ -32,11 +36,13 @@ struct SettingsView: View {
                     Button("Open Settings") { appState.permissions.openSystemAudioSettings() }
                 }
             }
-            Section("About") {
-                Text("Anti-Bleed_mic \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")")
-                Text("Engine: \(appState.snapshot.engineName)").font(.caption).foregroundStyle(.secondary)
+            Section {
+                LabeledContent("Version", value: appVersion)
+                LabeledContent("Engine", value: appState.snapshot.engineName)
                 Text("All processing is local. No cloud, no upload, no recording.")
                     .font(.caption).foregroundStyle(.secondary)
+            } header: {
+                Text("About")
             }
         }
         .formStyle(.grouped)

@@ -1,12 +1,14 @@
 import SwiftUI
 import AntiBleedCore
+import AntiBleedAudio
 
 @available(macOS 14.2, *)
 struct DiagnosticsView: View {
     @EnvironmentObject var appState: AppState
 
+    private var s: AntiBleedPipeline.Snapshot { appState.snapshot }
+
     var body: some View {
-        let s = appState.snapshot
         ScrollView {
             VStack(alignment: .leading, spacing: 6) {
                 Group {

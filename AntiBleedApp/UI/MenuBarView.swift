@@ -48,14 +48,8 @@ struct MenuBarView: View {
             MeterRow(label: "Speakers", levelDb: appState.snapshot.engine.renderRmsDb)
             MeterRow(label: "Clean mic", levelDb: appState.snapshot.engine.cleanedRmsDb)
 
-            HStack(spacing: 12) {
-                Label(String(format: "%.0f%% coupling", appState.snapshot.engine.couplingScore * 100), systemImage: "waveform.path")
-                if appState.snapshot.engine.aec.valid && appState.snapshot.engine.aec.delayMs >= 0 {
-                    Label("\(appState.snapshot.engine.aec.delayMs) ms", systemImage: "clock")
-                    Label(String(format: "%.0f dB ERLE", appState.snapshot.engine.aec.echoReturnLossEnhancement), systemImage: "speaker.slash")
-                }
-            }
-            .font(.caption).foregroundStyle(.secondary)
+            statsRow
+                .font(.caption).foregroundStyle(.secondary)
 
             HStack {
                 Button(appState.isRunning ? "Stop" : "Start") {
@@ -71,6 +65,22 @@ struct MenuBarView: View {
         }
         .padding(16)
         .frame(width: 360)
+    }
+}
+
+@available(macOS 14.2, *)
+extension MenuBarView {
+    private var statsRow: some View {
+        let engine = appState.snapshot.engine
+        let coupling = String(format: "%.0f%% coupling", Double(engine.couplingScore) * 100)
+        let erle = String(format: "%.0f dB ERLE", Double(engine.aec.echoReturnLossEnhancement))
+        return HStack(spacing: 12) {
+            Label(coupling, systemImage: "waveform.path")
+            if engine.aec.valid && engine.aec.delayMs >= 0 {
+                Label("\(engine.aec.delayMs) ms", systemImage: "clock")
+                Label(erle, systemImage: "speaker.slash")
+            }
+        }
     }
 }
 
