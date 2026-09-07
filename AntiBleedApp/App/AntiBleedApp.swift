@@ -1,5 +1,6 @@
 import SwiftUI
 
+@available(macOS 14.2, *)
 @main
 struct AntiBleedApp: App {
     @StateObject private var appState = AppState()

@@ -12,6 +12,7 @@ import AntiBleedRealtime
 ///
 /// DSP thread -> abm_fifo (lock-free) -> writer IOProc -> driver.
 /// Underflow -> writer emits silence (never replays), counted for diagnostics.
+@available(macOS 14.2, *)
 public final class VirtualMicWriter {
     public enum State: String { case unresolved, resolved, running, stopped, failed }
     public static let writerUID = DeviceManager.virtualWriterUID

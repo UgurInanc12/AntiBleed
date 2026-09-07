@@ -1,6 +1,7 @@
 import SwiftUI
 import ServiceManagement
 
+@available(macOS 14.2, *)
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled

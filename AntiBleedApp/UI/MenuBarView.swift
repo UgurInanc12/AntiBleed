@@ -1,6 +1,7 @@
 import SwiftUI
 import AntiBleedCore
 
+@available(macOS 14.2, *)
 struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.openWindow) private var openWindow

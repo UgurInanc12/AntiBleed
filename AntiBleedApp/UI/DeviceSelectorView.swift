@@ -1,6 +1,7 @@
 import SwiftUI
 import AntiBleedAudio
 
+@available(macOS 14.2, *)
 struct DeviceSelectorView: View {
     enum Kind { case input, output }
     var kind: Kind

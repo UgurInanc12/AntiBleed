@@ -12,6 +12,7 @@ import AntiBleedRealtime
 ///
 /// All heavy work happens on one high-priority worker thread that wakes on a
 /// semaphore signalled by the IOProc. Telemetry is copied for the UI at 20 Hz.
+@available(macOS 14.2, *)
 public final class AntiBleedPipeline {
     public struct Config: Equatable {
         public var micDeviceUID: String

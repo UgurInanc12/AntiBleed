@@ -1,6 +1,7 @@
 import SwiftUI
 import AntiBleedCore
 
+@available(macOS 14.2, *)
 struct DiagnosticsView: View {
     @EnvironmentObject var appState: AppState
 

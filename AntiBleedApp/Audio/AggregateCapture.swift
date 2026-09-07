@@ -17,6 +17,7 @@ import AntiBleedRealtime
 ///
 /// The tap is private, unmuted (speakers keep playing) and excludes our own
 /// process so Anti-Bleed's writer output never re-enters the reference.
+@available(macOS 14.2, *)
 public final class AggregateCapture {
     public enum State: String { case idle, creating, running, stopped, failed }
 
@@ -83,10 +84,13 @@ public final class AggregateCapture {
             // process (isExclusive = true semantics: everything EXCEPT the listed
             // processes) so the writer's audio never re-enters the reference.
             let excluded: [AudioObjectID] = ownProcessObjectID().map { [$0] } ?? []
-            let desc = CATapDescription(excludingProcesses: excluded, deviceUID: outUID, stream: 0)
+            // Swift import of -[CATapDescription initExcludingProcesses:andDeviceUID:withStream:]
+            // is init(processes:deviceUID:stream:) with isExclusive = true.
+            let desc = CATapDescription(processes: excluded, deviceUID: outUID, stream: 0)
+            desc.isExclusive = true        // capture everything EXCEPT the listed processes
             desc.name = "Anti-Bleed reference tap"
             desc.isPrivate = true
-            desc.muteBehavior = .unmuted   // speakers keep playing
+            desc.muteBehavior = CATapMuteBehavior.unmuted   // speakers keep playing
             desc.isMixdown = true          // stereo mixdown of the output
             desc.isMono = false
             var newTap = AudioObjectID(kAudioObjectUnknown)

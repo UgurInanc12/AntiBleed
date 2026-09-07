@@ -33,8 +33,8 @@ if [ "$(uname -s)" = "Darwin" ]; then
   EXTRA_ARGS+=(-Dneon=auto)
 fi
 
-meson setup build --buildtype=release -Ddefault_library=static -Dcpp_std=c++20 --prefix "${PREFIX}" "${EXTRA_ARGS[@]}" --reconfigure 2>/dev/null \
-  || meson setup build --buildtype=release -Ddefault_library=static -Dcpp_std=c++20 --prefix "${PREFIX}" "${EXTRA_ARGS[@]}"
+MESON_ARGS=(--buildtype=release -Ddefault_library=static -Dcpp_std=c++20 --prefix "${PREFIX}" --libdir lib "${EXTRA_ARGS[@]}")
+meson setup build "${MESON_ARGS[@]}" --reconfigure 2>/dev/null || meson setup build "${MESON_ARGS[@]}"
 meson compile -C build
 meson install -C build
 

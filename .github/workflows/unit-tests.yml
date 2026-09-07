@@ -34,7 +34,7 @@ jobs:
             git clone --branch $WEBRTC_APM_TAG --depth 1 $WEBRTC_APM_REPO wap
             Push-Location wap
             if ((git rev-parse HEAD) -ne $WEBRTC_APM_COMMIT) { throw "unpinned revision" }
-            meson setup build --vsenv --buildtype=release -Ddefault_library=static -Dcpp_std=c++20 -Dneon=disabled --prefix "$env:GITHUB_WORKSPACE/build/webrtc"
+            meson setup build --vsenv --buildtype=release -Ddefault_library=static -Dcpp_std=c++20 -Dneon=disabled --prefix "$env:GITHUB_WORKSPACE/build/webrtc" --libdir lib
             meson compile -C build
             meson install -C build
             Get-ChildItem -Recurse build/subprojects -Filter 'libabsl_*.a' | Copy-Item -Destination "$env:GITHUB_WORKSPACE/build/webrtc/lib/"

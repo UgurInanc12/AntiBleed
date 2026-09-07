@@ -5,6 +5,7 @@ import AntiBleedAudio
 
 /// UI-facing state (PLAN 17, 18, 24, 27). Owns the pipeline, device manager
 /// and permissions; polls pipeline telemetry at 20 Hz for meters.
+@available(macOS 14.2, *)
 @MainActor
 final class AppState: ObservableObject {
     // Persisted selections (UIDs are stable across reboots, IDs are not).

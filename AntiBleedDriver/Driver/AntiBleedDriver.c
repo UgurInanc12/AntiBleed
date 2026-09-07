@@ -248,7 +248,7 @@ static OSStatus AB_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver, Audi
     case kAudioDevicePropertyDeviceIsRunning: case kAudioDevicePropertyIsHidden: case kAudioDevicePropertyZeroTimeStampPeriod:
     case kAudioDevicePropertyLatency: case kAudioDevicePropertySafetyOffset: case kAudioStreamPropertyIsActive:
     case kAudioStreamPropertyDirection: case kAudioStreamPropertyTerminalType: case kAudioStreamPropertyStartingChannel:
-    case kAudioStreamPropertyLatency: case kAudioDevicePropertyDeviceCanBeDefaultDevice: case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
+    case kAudioDevicePropertyDeviceCanBeDefaultDevice: case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
         *outSize = sizeof(UInt32); return 0;
     case kAudioObjectPropertyManufacturer: case kAudioObjectPropertyName: case kAudioDevicePropertyDeviceUID:
     case kAudioDevicePropertyModelUID: case kAudioPlugInPropertyResourceBundle:

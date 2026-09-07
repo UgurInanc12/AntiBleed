@@ -68,7 +68,9 @@ final class RealtimeRingTests: XCTestCase {
         let f = abm_fifo_create(4096)!
         defer { abm_fifo_destroy(f) }
         let total = 200_000
+        let fifo = UInt(bitPattern: Int(bitPattern: UnsafeRawPointer(f))) // Sendable handle for the thread
         let producer = Thread {
+            let f = OpaquePointer(bitPattern: fifo)!
             var i = 0
             var block = [Float](repeating: 0, count: 480)
             while i < total {
