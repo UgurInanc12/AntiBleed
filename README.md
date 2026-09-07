@@ -1,7 +1,7 @@
 # Anti-Bleed_mic
 
 > macOS Acoustic Echo Cancellation virtual microphone - remove speaker bleed from your mic, keep your voice.
-> **Status:** Pre-implementation - plan frozen, repo skeleton pending.
+> **Status:** Implementation complete on the Windows side (real AEC3 built and measured, Swift core tested, HAL driver and Core Audio layer written). Remaining: compile and validate on a Mac (see Docs/Testing.md section 5).
 > **Primary target:** macOS 14.2+ (Apple Silicon first, Intel after)
 > **Virtual device:** `Anti-Bleed_mic` (Core Audio Audio Server Plug-in)
 > **AEC engine:** WebRTC APM / AEC3 (local-only, real-time)
@@ -36,6 +36,34 @@ YouTube / Discord / game audio
 This is **acoustic echo cancellation**, not generic noise suppression or AI voice filtering. The default signal path enables AEC only; NS/AGC are off.
 
 Hard rule from the spec: never `clean = mic - system_audio`. The acoustic path is a filtered, delayed, reverberated convolution `h(t) * r(t)` - only an adaptive AEC (AEC3) can estimate and cancel it.
+
+## Quick start
+
+macOS 14.2+ (build + run):
+
+```text
+Scripts/bootstrap-macos.sh          # Xcode CLT, cmake, meson, ninja, python venv
+Scripts/build-app.sh release        # WebRTC AEC3 -> AECBridge -> AntiBleed.driver -> app, all tests
+sudo Scripts/install-driver.sh      # Anti-Bleed_mic appears as an input device
+Scripts/package.sh release          # build/AntiBleed.app (signed if DEVELOPER_ID is set)
+open build/AntiBleed.app            # menu bar icon -> pick mic + speakers -> Start
+```
+
+Then select **Anti-Bleed_mic** as the microphone in Discord/Zoom. Speaker audio that reaches your mic is removed; with headphones the app stays in bypass and passes your mic through untouched.
+
+Windows (development, no Mac): `Docs/Testing.md` section 2. Real AEC3 offline tests and the Swift core suite run here.
+
+## How it decides (short)
+
+```
+speakers playing? --no--> BYPASS (raw mic)
+      | yes
+does the speaker signal actually show up in the mic (correlation + AEC3 delay/ERLE)?
+      | no  -> BYPASS/PROBING (raw mic)   <- headphones case
+      | yes -> LEARNING -> ACTIVE (AEC3 output, 100 ms crossfade)
+filter diverges / coupling lost / device change -> back to raw mic first, then re-learn
+```
+
 
 ## Repository layout (target)
 

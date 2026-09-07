@@ -1,4 +1,5 @@
 import SwiftUI
+import AntiBleedAudio
 
 struct DeviceSelectorView: View {
     enum Kind { case input, output }
@@ -6,19 +7,27 @@ struct DeviceSelectorView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        Picker(kind == .input ? "Microphone" : "Output", selection: kind == .input ? $appState.selectedMicUID : $appState.selectedOutputUID) {
-            ForEach(devices, id: \.self) { uid in
-                Text(uid).tag(Optional(uid))
+        Picker("", selection: binding) {
+            if kind == .output {
+                Text("None (headphones, no cancellation)").tag("")
+            }
+            ForEach(devices) { dev in
+                Text(dev.name).tag(dev.uid)
             }
         }
         .labelsHidden()
     }
 
-    private var devices: [String] {
-        if kind == .input {
-            return appState.deviceManager.inputDevices.map { $0.uid }
-        } else {
-            return appState.deviceManager.outputDevices.map { $0.uid }
-        }
+    private var devices: [AudioDevice] {
+        kind == .input ? appState.deviceManager.inputDevices : appState.deviceManager.outputDevices
+    }
+
+    private var binding: Binding<String> {
+        Binding(
+            get: { kind == .input ? appState.selectedMicUID : appState.selectedOutputUID },
+            set: { uid in
+                if kind == .input { appState.selectMic(uid) } else { appState.selectOutput(uid) }
+            }
+        )
     }
 }

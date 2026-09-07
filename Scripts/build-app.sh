@@ -1,31 +1,40 @@
 #!/bin/bash
+# Full macOS build: WebRTC APM -> AECBridge -> AntiBleed.driver -> AntiBleed app (SwiftPM).
+# Usage: Scripts/build-app.sh [debug|release]
 set -euo pipefail
-echo "[build-app] Building AntiBleedApp..."
+cd "$(dirname "$0")/.."
+CONFIG="${1:-release}"
 
-# On macOS: build via Xcode
-if command -v xcodebuild >/dev/null 2>&1; then
-  if [ -f "AntiBleedApp/AntiBleedApp.xcodeproj/project.pbxproj" ]; then
-    xcodebuild -project AntiBleedApp/AntiBleedApp.xcodeproj \
-      -scheme AntiBleedApp -configuration Debug build
-  else
-    echo "[build-app] No Xcode project yet (expected in Phase 0 on Mac)."
-    echo "[build-app] Skipping xcodebuild. Verifying Swift stubs parse..."
-    # At least verify Swift files exist
-    ls -la AntiBleedApp/App/*.swift AntiBleedApp/UI/*.swift AntiBleedApp/Audio/*.swift 2>&1 | head -n 30
-  fi
-else
-  echo "[build-app] xcodebuild not found (Windows/CI without macOS). Skipping."
-  echo "[build-app] Verifying file presence instead:"
-  ls -la AntiBleedApp/App/ AntiBleedApp/UI/ AntiBleedApp/Audio/ 2>&1 | head -n 30
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "[build-app] Not macOS. On Windows use:"
+  echo "  cmake -S AECBridge -B build/aec -G \"Visual Studio 16 2019\" -A x64 && cmake --build build/aec --config Release"
+  echo "  Scripts/swift-test-windows.cmd     (core unit tests)"
+  echo "  .venv/Scripts/pytest               (offline AEC3 + integration tests)"
+  exit 0
 fi
 
-# Also build C++ bridge if CMake is available
-if command -v cmake >/dev/null 2>&1; then
-  echo "[build-app] Building AECBridge..."
-  cmake -S AECBridge -B build/aec -DCMAKE_BUILD_TYPE=Release
-  cmake --build build/aec
+echo "[build-app] 1/4 WebRTC APM"
+if [ ! -f build/webrtc/lib/libwebrtc-audio-processing-2.a ]; then
+  Scripts/build-webrtc.sh
 else
-  echo "[build-app] cmake not found. Skipping C++ build (macOS CI will build it)."
+  echo "  cached: build/webrtc"
 fi
 
-echo "[build-app] Done."
+echo "[build-app] 2/4 AECBridge (C++/ObjC++ + C ABI)"
+cmake -S AECBridge -B build/aec -DCMAKE_BUILD_TYPE=Release -DANTIBLEED_REQUIRE_WEBRTC=ON
+cmake --build build/aec
+ctest --test-dir build/aec --output-on-failure
+
+echo "[build-app] 3/4 AntiBleed.driver"
+cmake -S AntiBleedDriver -B build/driver -DCMAKE_BUILD_TYPE=Release
+cmake --build build/driver
+ctest --test-dir build/driver --output-on-failure
+echo "  bundle: build/driver/AntiBleed.driver (install with sudo Scripts/install-driver.sh)"
+
+echo "[build-app] 4/4 Swift package"
+swift build -c "${CONFIG}" --product AntiBleed
+swift test
+
+APP_BIN=".build/${CONFIG}/AntiBleed"
+echo "[build-app] binary: ${APP_BIN}"
+echo "[build-app] To bundle as AntiBleed.app: Scripts/package.sh ${CONFIG}"

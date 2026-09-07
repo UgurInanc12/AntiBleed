@@ -1,16 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
-project(AntiBleed LANGUAGES CXX)
+project(AntiBleed LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-option(DSP_TESTS "Build DSP tests" OFF)
-
-if(DSP_TESTS)
-    enable_testing()
-    # DSP header-only tests are via pytest on Windows; this is for future C++ harness
-    # add_subdirectory(Tests/DSPTests) etc. when real C++ tests exist
-endif()
-
-# AECBridge is built via AECBridge/CMakeLists.txt on macOS
-# DSP is header-only; no separate target needed for Phase 0
+# Umbrella project: builds the native parts on any platform.
+#   AECBridge  - WebRTC AEC3 wrapper + C ABI + offline runner (needs build/webrtc, see Scripts/build-webrtc.sh)
+#   AntiBleedDriver - HAL plug-in (macOS) + ring policy tests (all platforms)
+#   DSP        - legacy C++ mirrors of the Python harness (kept for reference; the product uses AntiBleedCore in Swift)
+enable_testing()
+add_subdirectory(AECBridge)
+add_subdirectory(AntiBleedDriver)
+add_subdirectory(DSP)

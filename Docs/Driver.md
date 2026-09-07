@@ -1,48 +1,46 @@
 # Anti-Bleed_mic: Driver Notes
 
 > Master spec: ../ANTI_BLEED_MIC_PLAN.md chapters 15, 16, 27, 36, 37.
-> Status: stub - filled in Phase 8-11.
 
 ## 1. Choice
 
-Core Audio Audio Server Plug-in (`AntiBleed.driver`), not AudioDriverKit. Apple documents the plug-in as the preferred mechanism for virtual devices; AudioDriverKit is for physical drivers (D-004).
+Core Audio Audio Server Plug-in (`AntiBleed.driver`), not AudioDriverKit (D-004). Implemented in
+plain C against `<CoreAudio/AudioServerPlugIn.h>`: `AntiBleedDriver/Driver/AntiBleedDriver.c`.
+No BlackHole (GPL) code is used (D-010).
 
 ## 2. Topology (D-005)
 
 ```text
 Anti-Bleed app -> Anti-Bleed_internal_writer [hidden, output, UID com.antibleed.writer]
                       |
-               shared driver SPSC ring (bounded, lock-free)
+               driver ring (500 ms, lock-free, C11 atomics)
                       |
                Anti-Bleed_mic [visible, input, UID com.antibleed.mic] -> Discord
 ```
 
-- Visible: input-only, `isHidden=false`.
-- Hidden writer: output-only, `kAudioDevicePropertyIsHidden=true`, discovered by UID.
-- Install path: `/Library/Audio/Plug-Ins/HAL/AntiBleed.driver`.
+Object IDs: plug-in 1, mic device 2, mic stream 3, writer device 4, writer stream 5.
+Both devices: 48 kHz Float32 mono, fixed; `kAudioDevicePropertyNominalSampleRate` only accepts 48000.
+Writer: `kAudioDevicePropertyIsHidden = 1`, `CanBeDefaultDevice = 0`. Mic: `CanBeDefaultDevice = 1`.
 
-## 3. Ring policy
+## 3. IO
 
-- Bounded, preallocated, no malloc in I/O proc, no blocking lock.
-- Underflow (app not writing): output **silence**, never replay or uninitialized memory (PLAN 15.3).
-- Overrun: drop oldest stale data, deliver newest (PLAN 15.4).
-- Counters: `underruns`, `overruns`, high-water depth - readable via driver property for Diagnostics.
+- Writer `WriteMix` -> `ring_push`. Mic `ReadInput` -> `ring_pop`; underflow fills zeros and counts.
+- If the writer has no running IO (app quit or crashed) the mic reads pure silence: no stale audio.
+- Zero timestamp: software clock, 4800-frame period, seed bumps on each StartIO from idle.
+- Custom read-only property `'abrs'` on the mic device: a CFString `"underruns,overruns"` for Diagnostics.
 
-## 4. Self-reference avoidance
+## 4. Build and install (Mac)
 
-The system tap (Phase 2) must exclude the writer UID so driver writes never re-enter the AEC reference. Verify with the loopback tone test (write a tone only via the writer and assert it does not appear in the tap capture).
+```text
+cmake -S AntiBleedDriver -B build/driver -DCMAKE_BUILD_TYPE=Release && cmake --build build/driver
+sudo Scripts/install-driver.sh            # copies to /Library/Audio/Plug-Ins/HAL, restarts coreaudiod, verifies
+sudo Scripts/uninstall-driver.sh
+```
 
-## 5. BlackHole (Phase 6 only)
+`Info.plist` registers factory `5C1A3F0E-2B7D-4E8A-9C61-7A4D2E9B3F10` -> `AntiBleedDriver_Create` for `kAudioServerPlugInTypeUUID`.
 
-BlackHole 2ch was the Phase 6 scaffold before the native driver. GPL-3.0 - never copy its source into this repo's proprietary release without resolving licensing (PLAN 16.1, D-010). As of Phase 9, BlackHole is not a runtime dependency.
+## 5. Open Mac gates
 
-## 6. Installation (dev vs release)
-
-- Dev: `Scripts/install-driver.sh` / `uninstall-driver.sh` - copy to HAL, chown root:wheel, restart coreaudiod, verify device appears.
-- Release: signed `.pkg` containing `AntiBleed.app` + `AntiBleed.driver`, with postinstall verification (Phase 11, `Docs/Distribution.md`).
-
-## 7. Log - fill after each driver change
-
-| Date | Change | Writer->mic loop fidelity | Underflow silence | Overrun policy | Latency | Notes |
-|------|--------|---------------------------|-------------------|----------------|---------|-------|
-|      |        |                           |                   |                |         |       |
+- First load under coreaudiod (property table completeness is verified only by the HAL itself)
+- Measure writer -> mic latency (ring depth target 2-3 frames while the app writes steadily)
+- Verify `Anti-Bleed_internal_writer` does not appear in System Settings or Discord pickers

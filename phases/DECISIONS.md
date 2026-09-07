@@ -103,3 +103,29 @@ Newest decision at the bottom. Never delete entries; supersede with a new one.
 - Status: ACCEPTED (PLAN chapter 34)
 - Decision: Pin and surface: Xcode major version (in CI), macOS deployment target, `WEBRTC_REVISION` SHA, compiler settings, driver ABI/version, DSP config schema. Diagnostics surface `Anti-Bleed version / Git commit / WebRTC revision / Driver version / macOS version / CPU arch`.
 - Consequence: Every release artifact is traceable to these pins.
+
+## D-015: AEC3 sourced from webrtc-audio-processing (Meson), not a Chromium checkout
+
+- Status: ACCEPTED (supersedes the fetch mechanism in D-006; engine and defaults unchanged)
+- Context: The raw WebRTC checkout needs depot_tools/GN and a multi-GB sync, and cannot be built on the Windows workstation used for development. PulseAudio maintains `webrtc-audio-processing`, a standalone packaging of upstream WebRTC's Audio Processing Module including AEC3, buildable with Meson on macOS/Linux/Windows.
+- Decision: Pin `webrtc-audio-processing` tag `v2.1` (commit `846fe90a289f58b7c9303a635142aa2c7caa93e5`) in `WEBRTC_REVISION`. `Scripts/build-webrtc.sh` refuses to build any other commit. Built with `cpp_std=c++20`, static, into `build/webrtc`. License/NOTICE files staged into `build/webrtc/licenses` and shipped in the app bundle.
+- Consequence: Real AEC3 runs in the offline harness on Windows (`Tests/test_aec3_offline.py`, `Tests/test_pipeline_integration.py`). Measured on synthetic rooms: 43 to 56 dB echo attenuation, delays 10 to 200 ms found within 4 ms, 9 ms processing latency.
+
+## D-016: Swift core is platform-independent and unit-tested on Windows
+
+- Status: ACCEPTED
+- Decision: All decision logic (engine, safety FSM, coupling detector, synchronizer, frame assembler, crossfade, rings) lives in `AntiBleedApp/Core` (SwiftPM target `AntiBleedCore`) with no Core Audio/SwiftUI imports, plus C rings in `AntiBleedApp/Realtime`. Core Audio code is isolated in `AntiBleedApp/Audio` under `#if canImport(CoreAudio)`. `Scripts/swift-test-windows.cmd` runs the 43 XCTest cases with the winget Swift 6.3 toolchain.
+- Consequence: A Mac is required only for compiling `AntiBleedAudio`/`AntiBleedApp`/the HAL driver and for acoustic validation; every other regression is caught on Windows/CI.
+
+## D-017: Capture topology is one private aggregate (mic sub-device + process tap)
+
+- Status: ACCEPTED (implements D-003/D-011)
+- Decision: `AggregateCapture` creates a `CATapDescription` (private, unmuted, stereo mixdown, excluding our own process) and one private aggregate device containing the selected mic as main sub-device (drift compensated) and the tap in `kAudioAggregateDeviceTapListKey`. One IOProc receives both, so every callback carries a mic block and a render block for the same instant. The IOProc only downmixes to mono and pushes into `abm_ring` (no DSP).
+- Consequence: `AudioSynchronizer` sees near-zero skew inside the aggregate and acts as a guard, not as the primary alignment mechanism. Headphones mode is `outputDeviceUID == nil` (no tap, render channel silent, FSM stays BYPASS).
+
+## D-018: Coupling detector is decimated, hint-centred and ERLE-aware
+
+- Status: ACCEPTED (refines D-012 detector design)
+- Context: A per-frame full-band correlation over 480 samples could not see acoustic delays beyond 5 ms and scored 0.2 on a real 45 ms echo path.
+- Decision: The detector keeps a 650 ms history decimated 8x (6 kHz), correlates a 400 ms window over 0 to 250 ms of lag (1 ms steps), narrows to +-15 ms around the AEC3 delay estimate once available, and weights correlation 0.45, ERLE 0.35, lag stability 0.20, multiplied by AEC health. Evaluated every 100 ms.
+- Consequence: Measured 0.94 correlation at the true 45 ms lag with score 1.0 on the coupled case and score 0.0 on the headphones case, using the real AEC3 output statistics. Swift and Python mirrors must stay in sync (`AntiBleedApp/Core/CouplingDetector.swift`, `Tests/dsp/coupling_detector.py`).

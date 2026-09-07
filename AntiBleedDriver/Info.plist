@@ -2,12 +2,26 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleExecutable</key><string>AntiBleed</string>
     <key>CFBundleIdentifier</key><string>com.antibleed.driver</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AntiBleed</string>
-    <key>CFBundleVersion</key><string>0.1.0</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundlePackageType</key><string>BNDL</string>
-    <key>CFBundleSignature</key><string>aupp</string>
-    <key>AudioServerPlugInType</key><string>HAL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>14.2</string>
+    <key>NSHumanReadableCopyright</key><string>Anti-Bleed_mic. Local processing only.</string>
+    <key>CFPlugInDynamicRegistration</key><string>NO</string>
+    <key>CFPlugInFactories</key>
+    <dict>
+        <key>5C1A3F0E-2B7D-4E8A-9C61-7A4D2E9B3F10</key><string>AntiBleedDriver_Create</string>
+    </dict>
+    <key>CFPlugInTypes</key>
+    <dict>
+        <!-- kAudioServerPlugInTypeUUID -->
+        <key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+        <array><string>5C1A3F0E-2B7D-4E8A-9C61-7A4D2E9B3F10</string></array>
+    </dict>
 </dict>
 </plist>

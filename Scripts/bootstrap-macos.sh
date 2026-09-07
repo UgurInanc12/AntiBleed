@@ -1,16 +1,15 @@
 #!/bin/bash
+# One-time macOS setup for building Anti-Bleed_mic.
 set -euo pipefail
-echo "[bootstrap] Anti-Bleed_mic macOS bootstrap"
-echo "[bootstrap] Checking Xcode..."
-xcodebuild -version || { echo "ERROR: Xcode not found. Install from App Store."; exit 1; }
-xcrun --version || { echo "ERROR: Xcode CLT missing. Run: xcode-select --install"; exit 1; }
-echo "[bootstrap] Checking depot_tools (for Phase 4 WebRTC)..."
-if [ -d "${HOME}/dev/depot_tools" ]; then
-  echo "[bootstrap] depot_tools found at ${HOME}/dev/depot_tools"
-else
-  echo "[bootstrap] depot_tools not found. Phase 4 will install it via Scripts/build-webrtc.sh"
-fi
-echo "[bootstrap] Checking GN/Ninja..."
-which gn >/dev/null 2>&1 && gn --version || echo "[bootstrap] gn not found (will be installed with depot_tools)"
-which ninja >/dev/null 2>&1 && ninja --version || echo "[bootstrap] ninja not found (will be installed with depot_tools)"
-echo "[bootstrap] Done. Ready for Phase 0 build."
+echo "[bootstrap] Xcode / CLT"
+xcodebuild -version || { echo "Install Xcode (App Store) then: sudo xcode-select -s /Applications/Xcode.app"; exit 1; }
+xcrun --version >/dev/null || { echo "Run: xcode-select --install"; exit 1; }
+swift --version
+echo "[bootstrap] Homebrew tools (cmake, meson, ninja)"
+if ! command -v brew >/dev/null 2>&1; then echo "Install Homebrew: https://brew.sh"; exit 1; fi
+brew list cmake >/dev/null 2>&1 || brew install cmake
+brew list meson >/dev/null 2>&1 || brew install meson
+brew list ninja >/dev/null 2>&1 || brew install ninja
+echo "[bootstrap] Python harness"
+python3 -m venv .venv && .venv/bin/pip install -q -r Tests/requirements.txt
+echo "[bootstrap] Done. Next: Scripts/build-app.sh"

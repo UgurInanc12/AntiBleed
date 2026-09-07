@@ -1,26 +1,68 @@
 name: Unit Tests (cross-platform)
 on: [push, pull_request]
+
 jobs:
-  dsp-tests:
-    runs-on: ubuntu-latest
+  python-and-cpp:
+    name: Python harness + AEC3 offline (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Install Python deps
+          python-version: '3.12'
+      - name: Install Python deps + meson/ninja
+        run: pip install -r Tests/requirements.txt meson ninja
+      - name: Cache WebRTC APM build
+        uses: actions/cache@v4
+        with:
+          path: build/webrtc
+          key: webrtc-apm-${{ matrix.os }}-${{ hashFiles('WEBRTC_REVISION') }}
+      - name: Build WebRTC APM (Linux)
+        if: runner.os == 'Linux'
         run: |
-          if [ -f "Tests/requirements.txt" ]; then pip install -r Tests/requirements.txt; fi
-      - name: Python offline harness
+          if [ ! -f build/webrtc/lib/libwebrtc-audio-processing-2.a ]; then Scripts/build-webrtc.sh; fi
+      - name: Build WebRTC APM (Windows, MSVC)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          if [ -d "Tests" ]; then python -m pytest Tests/ -v; else echo "No Tests/ yet"; fi
-      - name: C++ DSP tests (if CMake available)
+          if (-not (Test-Path build/webrtc/lib/libwebrtc-audio-processing-2.a)) {
+            $rev = Get-Content WEBRTC_REVISION | Where-Object { $_ -match '^WEBRTC_APM_(TAG|COMMIT|REPO)=' } | ForEach-Object { $k,$v = $_ -split '=',2; Set-Variable -Name $k -Value $v }
+            git clone --branch $WEBRTC_APM_TAG --depth 1 $WEBRTC_APM_REPO wap
+            Push-Location wap
+            if ((git rev-parse HEAD) -ne $WEBRTC_APM_COMMIT) { throw "unpinned revision" }
+            meson setup build --vsenv --buildtype=release -Ddefault_library=static -Dcpp_std=c++20 -Dneon=disabled --prefix "$env:GITHUB_WORKSPACE/build/webrtc"
+            meson compile -C build
+            meson install -C build
+            Get-ChildItem -Recurse build/subprojects -Filter 'libabsl_*.a' | Copy-Item -Destination "$env:GITHUB_WORKSPACE/build/webrtc/lib/"
+            Pop-Location
+          }
+      - name: Build AECBridge + driver ring tests
         run: |
-          if [ -f "DSP/CMakeLists.txt" ]; then
-            cmake -S DSP -B build/dsp -DDSP_TESTS=ON -DCMAKE_BUILD_TYPE=Release
-            cmake --build build/dsp
-            ctest --test-dir build/dsp --output-on-failure
-          else
-            echo "No DSP/CMakeLists.txt yet (Phase 0 stub)"
-          fi
+          cmake -S AECBridge -B build/aec -DCMAKE_BUILD_TYPE=Release -DANTIBLEED_REQUIRE_WEBRTC=ON
+          cmake --build build/aec --config Release
+          ctest --test-dir build/aec -C Release --output-on-failure
+          cmake -S AntiBleedDriver -B build/driver -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/driver --config Release
+          ctest --test-dir build/driver -C Release --output-on-failure
+      - name: Python offline harness (includes real AEC3 cases A-J + 5 live scenarios)
+        run: python -m pytest Tests/ -v
+
+  swift-core:
+    name: Swift core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: swift-actions/setup-swift@v2
+        if: runner.os == 'Linux'
+        with:
+          swift-version: '6.0'
+      - name: swift test
+        run: swift test

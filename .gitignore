@@ -15,6 +15,7 @@ DerivedData/
 .build/
 .swiftpm/
 Package.resolved
+*.xctest
 
 # C++ / CMake
 build/
@@ -79,3 +80,10 @@ debug-dumps/
 .vscode/
 .idea/
 *.xcuserstate
+
+# graphify generated output
+graphify-out/
+graph.json
+
+# Local AGENTS.md is tracked; local scratch is not
+*.log

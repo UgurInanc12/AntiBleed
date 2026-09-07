@@ -5,9 +5,11 @@ struct AntiBleedApp: App {
     @StateObject private var appState = AppState()
 
     var body: some Scene {
-        MenuBarExtra("Anti-Bleed", systemImage: "waveform.badge.mic") {
+        MenuBarExtra {
             MenuBarView()
                 .environmentObject(appState)
+        } label: {
+            Image(systemName: appState.isRunning ? "waveform.badge.mic" : "mic.slash")
         }
         .menuBarExtraStyle(.window)
 
@@ -15,5 +17,11 @@ struct AntiBleedApp: App {
             SettingsView()
                 .environmentObject(appState)
         }
+
+        Window("Anti-Bleed Diagnostics", id: "diagnostics") {
+            DiagnosticsView()
+                .environmentObject(appState)
+        }
+        .defaultSize(width: 460, height: 520)
     }
 }

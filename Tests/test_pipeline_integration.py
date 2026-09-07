@@ -1,0 +1,236 @@
+"""
+End-to-end integration through the REAL AEC3 engine plus a faithful Python
+mirror of the Swift AntiBleedEngine (coupling detector -> render activity ->
+safety FSM -> output selection). This is the closest we get to the live Mac
+pipeline without hardware:
+
+    synthetic room: mic = voice + IR * speaker
+    -> aec_offline (WebRTC AEC3, real)              [cleaned frames]
+    -> coupling detector + safety FSM (mirrors Swift) [rawMic / aec / xfade]
+    -> virtual mic output
+
+Scenarios (PLAN 13.8 "five live scenarios"):
+  1. speakers playing, real coupling      -> reaches ACTIVE, bleed strongly reduced
+  2. headphones (render active, no echo)  -> stays BYPASS/PROBING, output == raw mic
+  3. nothing playing                      -> BYPASS, output == raw mic
+  4. double talk                          -> ACTIVE, voice preserved, echo reduced
+  5. route change mid-call                -> immediate BYPASS then re-activation
+"""
+import math
+import pathlib
+import sys
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+from dsp.coupling_detector import CouplingDetector  # noqa: E402
+from dsp.signal_metrics import rms_db  # noqa: E402
+from test_aec3_offline import RUNNER, SR, FRAME, run_aec, speech_like, room_ir, echo_of, aligned_corr  # noqa: E402
+
+pytestmark = pytest.mark.skipif(RUNNER is None, reason="aec_offline runner not built")
+
+
+# ------------------------------------------------------------------ FSM mirror
+class FSM:
+    """Mirror of AntiBleedApp/Core/SafetyStateMachine.swift (same thresholds)."""
+
+    def __init__(self):
+        self.state = "bypass"
+        self.frames = 0
+        self.transitions = []
+        self.ramp_total = 10
+        self.ramp_pos = None
+        self.ramp_to_processed = True
+
+    def _go(self, s):
+        if s != self.state:
+            self.transitions.append((self.state, s))
+            self.state = s
+            self.frames = 0
+
+    def _ramp(self, to_processed):
+        self.ramp_to_processed = to_processed
+        self.ramp_pos = 0
+
+    def _out(self, idle):
+        if self.ramp_pos is None:
+            return idle
+        p = self.ramp_pos / self.ramp_total
+        self.ramp_pos += 1
+        if self.ramp_pos >= self.ramp_total:
+            self.ramp_pos = None
+        return ("xfade", p if self.ramp_to_processed else 1 - p)
+
+    def update(self, render_active, score, stable, div, aec_available=True, route_changed=False):
+        if route_changed:
+            self._go("bypass"); self.ramp_pos = None
+            return "raw"
+        if div > 0.3 and self.state in ("active", "learning"):
+            self._go("degraded"); self._ramp(False)
+        self.frames += 1
+        s = self.state
+        if s == "bypass":
+            if render_active and aec_available:
+                self._go("probing")
+            return self._out("raw")
+        if s == "probing":
+            if not render_active:
+                self._go("bypass"); return "raw"
+            if score > 0.6 and stable >= 3:
+                self._go("learning")
+            return "raw"
+        if s == "learning":
+            if not render_active or score < 0.3:
+                self._go("bypass"); return "raw"
+            if score > 0.7 and div < 0.1 and self.frames > 30:
+                self._go("active"); self._ramp(True)
+                return self._out("aec")
+            return "raw"
+        if s == "active":
+            if not render_active:
+                self._go("bypass"); self._ramp(False); return self._out("raw")
+            if score < 0.35 or div > 0.2:
+                self._go("degraded"); self._ramp(False); return self._out("raw")
+            return self._out("aec")
+        if s == "degraded":
+            if self.frames > 50:
+                self._go("bypass"); return "raw"
+            if score > 0.65 and div < 0.05:
+                self._go("learning")
+            return self._out("raw")
+        return "raw"
+
+
+class RenderActivity:
+    def __init__(self, threshold_db=-55, hangover=50):
+        self.t = threshold_db; self.h = hangover; self.rem = 0
+
+    def update(self, db):
+        if db > self.t:
+            self.rem = self.h; return True
+        if self.rem > 0:
+            self.rem -= 1; return True
+        return False
+
+
+def equal_power(a, b, p):
+    return math.cos(p * math.pi / 2) * a + math.sin(p * math.pi / 2) * b
+
+
+def run_pipeline(render, mic, aec_stats_stream=None, route_change_at=None):
+    """Runs the real AEC once over the whole stream (as the live engine does frame by
+    frame, AEC is stateful and order-preserving), then walks the frames through the
+    detector + FSM exactly like AntiBleedEngine.process()."""
+    cleaned, stats, frame_stats = run_aec(render, mic, per_frame=True)
+    if not stats["real_aec"]:
+        pytest.skip("runner built without WebRTC")
+    n = min(len(render), len(mic), len(cleaned)) // FRAME
+    det = CouplingDetector()
+    ra = RenderActivity()
+    fsm = FSM()
+    out = np.zeros(n * FRAME, dtype=np.float32)
+    states, outputs = [], []
+    last = {"score": 0.0, "stable_windows": 0}
+    for i in range(n):
+        r = render[i * FRAME:(i + 1) * FRAME]
+        m = mic[i * FRAME:(i + 1) * FRAME]
+        c = cleaned[i * FRAME:(i + 1) * FRAME]
+        fs = frame_stats[i]
+        aec_stats = {"valid": bool(fs["valid"]), "delayMs": fs["delay_ms"], "erleDb": fs["erle_db"],
+                     "divergentFilterFraction": fs["divergent"]}
+        div = fs["divergent"]
+        active = ra.update(rms_db(r))
+        det.push(r, m)
+        if i % 10 == 0:  # mirrors AntiBleedEngine.couplingEveryNFrames
+            last = det.evaluate(aec_stats)
+        sel = fsm.update(active, last["score"], last["stable_windows"], div,
+                         route_changed=(route_change_at is not None and i == route_change_at))
+        if sel == "raw":
+            out[i * FRAME:(i + 1) * FRAME] = m
+        elif sel == "aec":
+            out[i * FRAME:(i + 1) * FRAME] = c
+        else:
+            out[i * FRAME:(i + 1) * FRAME] = equal_power(m, c, sel[1])
+        states.append(fsm.state); outputs.append(sel if isinstance(sel, str) else "xfade")
+    return out, cleaned, states, outputs, fsm, stats
+
+
+# ------------------------------------------------------------------ scenarios
+def test_scenario_1_speakers_with_bleed_reaches_active_and_removes_bleed():
+    render = speech_like(8.0, seed=1)
+    ir = room_ir(int(0.045 * SR), gain=0.5)
+    echo = echo_of(render, ir)
+    mic = echo.copy()  # user silent: everything in the mic is bleed
+    out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic)
+    active_frac = states.count("active") / len(states)
+    tail = slice(-2 * SR, None)
+    att = rms_db(mic[tail]) - rms_db(out[tail])
+    print(f"S1: active {active_frac:.0%}, transitions {fsm.transitions[:6]}, bleed attenuation {att:.1f} dB")
+    assert "active" in states
+    assert active_frac > 0.5
+    assert att > 15.0
+    assert states[-1] == "active"
+
+
+def test_scenario_2_headphones_no_coupling_stays_raw():
+    render = speech_like(6.0, seed=2)
+    mic = speech_like(6.0, seed=3, burst_hz=0.8)  # user's voice only, no echo
+    out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic)
+    print(f"S2: states {sorted(set(states))}, outputs {sorted(set(outputs))}")
+    assert "active" not in states and "learning" not in states
+    assert set(outputs) == {"raw"}
+    np.testing.assert_array_equal(out[: len(states) * FRAME], mic[: len(states) * FRAME])
+
+
+def test_scenario_3_nothing_playing_is_transparent():
+    mic = speech_like(4.0, seed=4)
+    render = np.zeros_like(mic)
+    out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic)
+    assert set(states) == {"bypass"}
+    assert set(outputs) == {"raw"}
+    np.testing.assert_array_equal(out[: len(states) * FRAME], mic[: len(states) * FRAME])
+
+
+def test_scenario_4_double_talk_keeps_voice_removes_bleed():
+    render = speech_like(8.0, seed=5)
+    voice = speech_like(8.0, seed=6, burst_hz=0.7)
+    ir = room_ir(int(0.050 * SR), gain=0.5)
+    echo = echo_of(render, ir)
+    mic = (voice + echo).astype(np.float32)
+    out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic)
+    assert "active" in states
+    tail = slice(-3 * SR, None)
+    corr_voice, lag = aligned_corr(voice[tail], out[tail])
+    n = len(out[tail]) - lag
+    e = echo[tail][:n]; o = out[tail][lag:lag + n]
+    corr_echo_out = float(np.dot(e, o) / (math.sqrt(float(np.dot(e, e) * np.dot(o, o))) or 1e-12))
+    corr_echo_mic, _ = aligned_corr(echo[tail], mic[tail])
+    print(f"S4: corr(voice,out)={corr_voice:.2f} corr(echo,mic)={corr_echo_mic:.2f} corr(echo,out)={corr_echo_out:.2f}")
+    assert corr_voice > 0.7
+    assert abs(corr_echo_out) < 0.5 * abs(corr_echo_mic)
+
+
+def test_scenario_5_route_change_drops_to_raw_then_reactivates():
+    render = speech_like(10.0, seed=7)
+    ir = room_ir(int(0.040 * SR), gain=0.5)
+    mic = echo_of(render, ir)
+    change_frame = 500  # 5 s
+    out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic, route_change_at=change_frame)
+    assert states[change_frame - 1] == "active"
+    assert outputs[change_frame] == "raw"
+    assert states[change_frame] in ("bypass", "probing")
+    assert "active" in states[change_frame + 1:], "must re-activate after route change"
+    print(f"S5: re-activated after {states[change_frame:].index('active') * 10} ms")
+
+
+def test_invariant_output_is_always_convex_mix_of_mic_and_cleaned():
+    render = speech_like(3.0, seed=8)
+    mic = echo_of(render, room_ir(int(0.03 * SR), 0.5))
+    out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic)
+    n = len(states) * FRAME
+    lo = np.minimum(mic[:n], cleaned[:n]) - 1e-6
+    hi = np.maximum(mic[:n], cleaned[:n]) + 1e-6
+    # equal-power crossfade can exceed the linear hull by at most sqrt(2) in magnitude;
+    # bound with that factor.
+    assert np.all(np.abs(out[:n]) <= np.maximum(np.abs(lo), np.abs(hi)) * math.sqrt(2) + 1e-6)

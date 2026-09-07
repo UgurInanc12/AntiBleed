@@ -1,1 +1,9 @@
-WEBRTC_REVISION=main  # PIN BEFORE PHASE 4 — replace with 40-char commit SHA
+# AEC engine pin (D-006, D-014). Do not float.
+# Source: PulseAudio's webrtc-audio-processing, a maintained standalone packaging of
+# upstream WebRTC's Audio Processing Module (AEC3 included). Builds with Meson on
+# macOS/Windows/Linux without depot_tools/GN, which is why it replaces the raw
+# Chromium checkout from the original plan (see DECISIONS.md D-015).
+WEBRTC_APM_REPO=https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing.git
+WEBRTC_APM_TAG=v2.1
+WEBRTC_APM_COMMIT=846fe90a289f58b7c9303a635142aa2c7caa93e5
+# Upstream WebRTC snapshot contained in v2.1 is documented in that repo's NEWS file.

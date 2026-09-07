@@ -6,18 +6,20 @@
 
 | Phase | Document | Scope | Status |
 |-------|----------|-------|--------|
-| 0 | PHASE-0-repo-and-build-skeleton.md | Repository layout, Swift/C++ skeleton, CI - no DSP | NOT STARTED |
-| 1 | PHASE-1-raw-microphone-capture.md | Device enumeration, raw mic capture, permission, 48 kHz framing | NOT STARTED |
-| 2 | PHASE-2-system-audio-tap.md | Core Audio Process Tap, render reference, permissions | NOT STARTED |
-| 3 | PHASE-3-timing-and-aggregate-device.md | Private aggregate device, clock sync, timestamped queues | NOT STARTED |
-| 4 | PHASE-4-offline-webrtc-aec3.md | Pinned WebRTC AEC3, offline synthetic tests (Case A-J) | NOT STARTED |
-| 5 | PHASE-5-live-aec.md | Live tap+mic -> AEC3, real speaker bleed reduction | NOT STARTED |
-| 6 | PHASE-6-blackhole-mvp.md | BlackHole output -> Discord end-to-end MVP | NOT STARTED |
-| 7 | PHASE-7-safety-state-machine.md | BYPASS/PROBING/LEARNING/ACTIVE/DEGRADED, coupling detector | NOT STARTED |
-| 8 | PHASE-8-custom-virtual-driver.md | Audio Server Plug-in: Anti-Bleed_mic + hidden writer | NOT STARTED |
-| 9 | PHASE-9-remove-blackhole-dependency.md | Clean Mac without BlackHole | NOT STARTED |
-| 10 | PHASE-10-product-ui-and-recovery.md | Menu-bar UI, meters, diagnostics, auto-recovery | NOT STARTED |
-| 11 | PHASE-11-packaging-and-distribution.md | Signing, Hardened Runtime, notarization, installer | NOT STARTED |
+| 0 | PHASE-0-repo-and-build-skeleton.md | Repository layout, Swift/C++ skeleton, CI - no DSP | DONE 2026-09-07 (SwiftPM package, CMake for AECBridge/driver, CI). Xcode project replaced by Package.swift |
+| 1 | PHASE-1-raw-microphone-capture.md | Device enumeration, raw mic capture, permission, 48 kHz framing | CODED 2026-09-07 (DeviceManager, AggregateCapture, Permissions, FrameAssembler tested). Mac gate: live capture |
+| 2 | PHASE-2-system-audio-tap.md | Core Audio Process Tap, render reference, permissions | CODED 2026-09-07 (CATapDescription inside AggregateCapture). Mac gate: tap permission + self-exclusion check |
+| 3 | PHASE-3-timing-and-aggregate-device.md | Private aggregate device, clock sync, timestamped queues | CODED 2026-09-07 (aggregate with tap list, AudioSynchronizer 30 min skew test green). Mac gate: 30 min live |
+| 4 | PHASE-4-offline-webrtc-aec3.md | Pinned WebRTC AEC3, offline synthetic tests (Case A-J) | DONE 2026-09-07 (real AEC3 built on Windows, cases A/B/E/F/G/H/J green, 43-56 dB attenuation) |
+| 5 | PHASE-5-live-aec.md | Live tap+mic -> AEC3, real speaker bleed reduction | CODED 2026-09-07 (AntiBleedPipeline DSP thread wired). Mac gate: real speaker measurement |
+| 6 | PHASE-6-blackhole-mvp.md | BlackHole output -> Discord end-to-end MVP | SKIPPED by decision: native driver (Phase 8) implemented directly, no GPL dependency ever entered the tree |
+| 7 | PHASE-7-safety-state-machine.md | BYPASS/PROBING/LEARNING/ACTIVE/DEGRADED, coupling detector | DONE 2026-09-07 (Swift FSM + detector, 5 live scenarios simulated against real AEC3, all green) |
+| 8 | PHASE-8-custom-virtual-driver.md | Audio Server Plug-in: Anti-Bleed_mic + hidden writer | CODED 2026-09-07 (AntiBleedDriver.c full HAL interface, ring tests green). Mac gate: install + Discord enumeration |
+| 9 | PHASE-9-remove-blackhole-dependency.md | Clean Mac without BlackHole | N/A (never depended on BlackHole) |
+| 10 | PHASE-10-product-ui-and-recovery.md | Menu-bar UI, meters, diagnostics, auto-recovery | CODED 2026-09-07 (MenuBarView, DiagnosticsView, SettingsView, device-loss fallback). Mac gate: UI run |
+| 11 | PHASE-11-packaging-and-distribution.md | Signing, Hardened Runtime, notarization, installer | CODED 2026-09-07 (package.sh, install scripts, CI artifact). Mac gate: Developer ID + notarization |
+
+Legend: DONE = verified by real execution; CODED = implemented and unit-tested where possible, awaiting the listed Mac hardware gate; see Docs/Testing.md for the exact numbers.
 
 Hard rule from PLAN.md chapter 44: Do not start by writing the driver. Prove synchronized AEC first.
 
@@ -44,14 +46,14 @@ Code repository:         (to be created) github.com/UgurInanc12/AntiBleed  [TBD]
 Local workspace (Win):   D:\Hermes\ANTI_BLEED_MIC
 Local workspace (Mac):   ~/dev/AntiBleed  (or as chosen on the Mac)
 CI:                      GitHub Actions - macos-14+ runner for Swift/C++/driver
-Offline harness:         Python + pytest (runs on Windows without a Mac)
+Offline harness:         Python + pytest + real AEC3 (aec_offline) + Swift XCTest (runs on Windows without a Mac)
 ```
 
 ## Environment model
 
 ```text
 Build on Mac:    Xcode (latest stable for target macOS) + CLT + depot_tools/GN/Ninja
-Build on Win:    Python 3.11 + uv + pytest (DSP harness only; no Xcode)
+Build on Win:    Python 3.12 + uv + pytest, MSVC 2019 + CMake (AECBridge, driver ring), Swift 6.3 (core tests)
 CI on macOS:     Swift build + C++ build + offline DSP tests + driver compile
 CI on Win/Linux: platform-independent C++ DSP tests (optional)
 Secrets:         Developer ID certs + notarization creds in GitHub Actions secrets only

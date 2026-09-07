@@ -1,0 +1,6 @@
+module AECBridgeC [system] {
+    header "aec_c_api.h"
+    link "AECBridge"
+    link "webrtc-audio-processing-2"
+    export *
+}
