@@ -52,17 +52,14 @@ jobs:
         run: python -m pytest Tests/ -v
 
   swift-core:
-    name: Swift core (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-14]
+    # Core-only test on Linux (no Core Audio). On macOS the whole package incl.
+    # AECBridge linkage is exercised by macos-build.yml (Scripts/build-app.sh).
+    name: Swift core (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: swift-actions/setup-swift@v2
-        if: runner.os == 'Linux'
         with:
           swift-version: '6.0'
-      - name: swift test
+      - name: swift test (AntiBleedCore + Realtime)
         run: swift test

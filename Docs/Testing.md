@@ -74,7 +74,7 @@ Acceptance: bleed reduced by >= 15 dB on speakers; headphones stay in BYPASS; do
 
 ## 5. Mac gate checklist (open)
 
-- [ ] `Scripts/build-app.sh` compiles AntiBleedAudio/AntiBleedApp (first real Swift-on-macOS compile of the Core Audio layer)
+- [x] `Scripts/build-app.sh` compiles AntiBleedAudio/AntiBleedApp (verified on GitHub macos-14 runner, 2026-09-07: APM + AECBridge + driver + app, 43 Swift + 84 Python tests green)
 - [ ] `sudo Scripts/install-driver.sh` -> `Anti-Bleed_mic` visible, writer hidden
 - [ ] System audio permission prompt appears on first start; denial keeps raw mic working
 - [ ] Tap exclusion: play a tone through the app itself, verify it is not in the render meter

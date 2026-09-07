@@ -6,7 +6,7 @@
 
 | Phase | Document | Scope | Status |
 |-------|----------|-------|--------|
-| 0 | PHASE-0-repo-and-build-skeleton.md | Repository layout, Swift/C++ skeleton, CI - no DSP | DONE 2026-09-07 (SwiftPM package, CMake for AECBridge/driver, CI). Xcode project replaced by Package.swift |
+| 0 | PHASE-0-repo-and-build-skeleton.md | Repository layout, Swift/C++ skeleton, CI - no DSP | DONE 2026-09-07 (SwiftPM package, CMake for AECBridge/driver, CI). Clean clone builds on macos-14 CI: APM, AECBridge, AntiBleed.driver, app, 43 Swift + 84 Python tests |
 | 1 | PHASE-1-raw-microphone-capture.md | Device enumeration, raw mic capture, permission, 48 kHz framing | CODED 2026-09-07 (DeviceManager, AggregateCapture, Permissions, FrameAssembler tested). Mac gate: live capture |
 | 2 | PHASE-2-system-audio-tap.md | Core Audio Process Tap, render reference, permissions | CODED 2026-09-07 (CATapDescription inside AggregateCapture). Mac gate: tap permission + self-exclusion check |
 | 3 | PHASE-3-timing-and-aggregate-device.md | Private aggregate device, clock sync, timestamped queues | CODED 2026-09-07 (aggregate with tap list, AudioSynchronizer 30 min skew test green). Mac gate: 30 min live |
@@ -19,7 +19,7 @@
 | 10 | PHASE-10-product-ui-and-recovery.md | Menu-bar UI, meters, diagnostics, auto-recovery | CODED 2026-09-07 (MenuBarView, DiagnosticsView, SettingsView, device-loss fallback). Mac gate: UI run |
 | 11 | PHASE-11-packaging-and-distribution.md | Signing, Hardened Runtime, notarization, installer | CODED 2026-09-07 (package.sh, install scripts, CI artifact). Mac gate: Developer ID + notarization |
 
-Legend: DONE = verified by real execution; CODED = implemented and unit-tested where possible, awaiting the listed Mac hardware gate; see Docs/Testing.md for the exact numbers.
+Legend: DONE = verified by real execution; CODED = compiles on the macOS CI runner and is unit-tested where possible, awaiting the listed Mac hardware gate (real devices, coreaudiod driver load, speakers); see Docs/Testing.md for the exact numbers.
 
 Hard rule from PLAN.md chapter 44: Do not start by writing the driver. Prove synchronized AEC first.
 

@@ -1,7 +1,7 @@
 # Anti-Bleed_mic
 
 > macOS Acoustic Echo Cancellation virtual microphone - remove speaker bleed from your mic, keep your voice.
-> **Status:** Implementation complete on the Windows side (real AEC3 built and measured, Swift core tested, HAL driver and Core Audio layer written). Remaining: compile and validate on a Mac (see Docs/Testing.md section 5).
+> **Status:** Builds end to end on macOS CI (APM, AECBridge, AntiBleed.driver, app; 43 Swift + 84 Python tests). Remaining: install and validate on real Mac hardware (see Docs/Testing.md section 5).
 > **Primary target:** macOS 14.2+ (Apple Silicon first, Intel after)
 > **Virtual device:** `Anti-Bleed_mic` (Core Audio Audio Server Plug-in)
 > **AEC engine:** WebRTC APM / AEC3 (local-only, real-time)
