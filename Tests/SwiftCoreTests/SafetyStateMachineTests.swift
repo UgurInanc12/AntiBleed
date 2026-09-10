@@ -70,6 +70,64 @@ final class SafetyStateMachineTests: XCTestCase {
         XCTAssertEqual(sm.state, .degraded)
     }
 
+    /// D-020: losing the reference output (user switched to headphones) must drop
+    /// ACTIVE and expose the raw mic. It must never expose silence: the virtual
+    /// microphone has to keep carrying the user's voice mid-call.
+    func testLosingAECAvailabilityFallsBackToRawNotSilence() {
+        let sm = SafetyStateMachine(); sm.start()
+        for _ in 0..<80 { _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats()) }
+        XCTAssertEqual(sm.state, .active)
+
+        var sawSilence = false
+        var out: OutputSelection = .silence
+        for _ in 0..<200 {
+            out = sm.update(renderActivity: RenderActivity(isActive: true),
+                            coupling: CouplingResult(score: 0.9, stableWindows: 10),
+                            aecStats: stats(), aecAvailable: false)
+            if out == .silence { sawSilence = true }
+            XCTAssertNotEqual(sm.state, .active, "must not process without a usable AEC")
+        }
+        XCTAssertFalse(sawSilence, "the virtual mic must never go silent on a route change")
+        XCTAssertEqual(sm.state, .bypass)
+        XCTAssertEqual(out, .rawMic)
+
+        // Reference output restored: the FSM is free to climb back to ACTIVE.
+        for _ in 0..<200 {
+            _ = sm.update(renderActivity: RenderActivity(isActive: true),
+                          coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats())
+        }
+        XCTAssertEqual(sm.state, .active)
+    }
+
+    /// The fallback is a crossfade, not a hard cut, so the switch is not a click.
+    func testLosingAECAvailabilityCrossfadesOutOfProcessed() {
+        let sm = SafetyStateMachine(); sm.start()
+        for _ in 0..<80 { _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats()) }
+        XCTAssertEqual(sm.state, .active)
+        var progresses: [Float] = []
+        for _ in 0..<sm.crossfadeFrames {
+            let out = sm.update(renderActivity: RenderActivity(isActive: true),
+                                coupling: CouplingResult(score: 0.9, stableWindows: 10),
+                                aecStats: stats(), aecAvailable: false)
+            if case .crossfade(let p) = out { progresses.append(p) }
+        }
+        XCTAssertEqual(progresses.count, sm.crossfadeFrames)
+        // Fading towards raw: progress (share of processed) decreases.
+        XCTAssertEqual(progresses, progresses.sorted(by: >))
+    }
+
+    /// A disabled AEC must not even start probing.
+    func testUnavailableAECNeverEntersProbing() {
+        let sm = SafetyStateMachine(); sm.start()
+        for _ in 0..<500 {
+            let out = sm.update(renderActivity: RenderActivity(isActive: true),
+                                coupling: CouplingResult(score: 0.95, stableWindows: 10),
+                                aecStats: stats(), aecAvailable: false)
+            XCTAssertEqual(out, .rawMic)
+            XCTAssertEqual(sm.state, .bypass)
+        }
+    }
+
     func testFullPathToActiveWithCrossfade() {
         let sm = SafetyStateMachine(); sm.start()
         var outputs: [OutputSelection] = []

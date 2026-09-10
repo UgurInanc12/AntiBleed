@@ -60,6 +60,17 @@ public final class AntiBleedEngine {
     /// (raw mic) but still feeds AEC so re-enabling converges instantly.
     public var aecEnabled: Bool = true
 
+    /// Set while the selected reference output is not the one macOS actually
+    /// plays through (headphones, AirPlay, a dock). There is no bleed to remove
+    /// and AEC3 would attenuate the near-end voice by ~6 dB, so the engine holds
+    /// BYPASS and passes the raw microphone through untouched. Audio keeps
+    /// flowing to the virtual mic: the app must never go silent mid-call (D-020).
+    /// The AEC still runs so re-selecting the speakers converges immediately.
+    public var referenceOutputActive: Bool = true
+
+    /// Whether the FSM may expose processed audio right now.
+    public var aecUsable: Bool { aecEnabled && referenceOutputActive && aec.isRealAEC }
+
     /// Run the (comparatively expensive) coupling analysis every N frames (10 = 100 ms).
     public var couplingEveryNFrames: Int = 10
 
@@ -152,7 +163,7 @@ public final class AntiBleedEngine {
         let selection = fsm.update(renderActivity: activity,
                                    coupling: lastCoupling,
                                    aecStats: aecStats,
-                                   aecAvailable: aecEnabled && aec.isRealAEC,
+                                   aecAvailable: aecUsable,
                                    routeChanged: routeChanged)
 
         // 5. Output selection. Candidates: aligned raw mic, cleaned, mix, zeros.

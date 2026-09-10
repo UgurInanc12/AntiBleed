@@ -140,6 +140,14 @@ public final class AntiBleedPipeline {
         engine.aecEnabled = enabled
     }
 
+    /// Tells the engine whether the selected reference output is the one macOS
+    /// currently plays through. False holds BYPASS (raw mic keeps flowing to the
+    /// virtual mic) instead of stopping the pipeline, so the microphone never
+    /// dies mid-call when the user switches to headphones (D-020).
+    public func setReferenceOutputActive(_ active: Bool) {
+        engine.referenceOutputActive = active
+    }
+
     public func currentSnapshot() -> Snapshot {
         snapshotLock.lock(); defer { snapshotLock.unlock() }
         return snapshot

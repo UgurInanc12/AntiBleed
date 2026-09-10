@@ -108,6 +108,17 @@ public final class SafetyStateMachine {
             beginRamp(toProcessed: false)
         }
 
+        // The AEC became unavailable (user toggle off, no real engine, or the
+        // reference output is no longer the one macOS plays through). Processed
+        // audio must not stay exposed: crossfade back to the raw mic (D-020).
+        if !aecAvailable && (state == .active || state == .learning || state == .probing) {
+            let wasProcessed = state == .active
+            transition(to: .bypass)
+            if wasProcessed { beginRamp(toProcessed: false) } else { ramp.reset() }
+            framesInState += 1
+            return wasProcessed ? rampedOutput(idle: .rawMic) : .rawMic
+        }
+
         framesInState += 1
 
         switch state {

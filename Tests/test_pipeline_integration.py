@@ -74,6 +74,15 @@ class FSM:
         self.silent_frames = 0 if render_active else self.silent_frames + 1
         if div > 0.3 and self.state in ("active", "learning"):
             self._go("degraded"); self._ramp(False)
+        # D-020: no usable AEC -> raw mic, never silence.
+        if not aec_available and self.state in ("active", "learning", "probing"):
+            was_processed = self.state == "active"
+            self._go("bypass")
+            if was_processed:
+                self._ramp(False)
+                return self._out("raw")
+            self.ramp_pos = None
+            return "raw"
         self.frames += 1
         s = self.state
         if s == "bypass":

@@ -183,6 +183,49 @@ final class EngineTests: XCTestCase {
         let out = engine.process(render: Signals.frame(r, seq: 0), mic: Signals.frame(r, seq: 0))
         XCTAssertTrue(out.samples.allSatisfy { $0 == 0 })
     }
+
+    /// D-020 headphones case: the reference output is no longer the macOS output.
+    /// The AEC must disengage but the microphone must keep flowing, because the
+    /// virtual mic is a live input in someone's call.
+    func testReferenceOutputInactiveKeepsMicFlowing() {
+        let aec = FakeCanceller()
+        let engine = AntiBleedEngine(aec: aec)
+        engine.start()
+        // Reach ACTIVE with real coupling.
+        for i in 0..<400 {
+            let r = Signals.noise(480, seed: UInt64(i) + 1)
+            _ = engine.process(render: Signals.frame(r, seq: UInt64(i)), mic: Signals.frame(r.map { 0.5 * $0 }, seq: UInt64(i)))
+        }
+        XCTAssertEqual(engine.state, .active)
+
+        // User switches macOS output to headphones.
+        engine.referenceOutputActive = false
+        XCTAssertFalse(engine.aecUsable)
+        var lastOut = AudioFrame.silence()
+        var micStream: [[Float]] = []
+        for i in 0..<200 {
+            let r = Signals.noise(480, seed: UInt64(i) + 900)
+            let mic = Signals.noise(480, seed: UInt64(i) + 90_000)
+            micStream.append(mic)
+            lastOut = engine.process(render: Signals.frame(r, seq: 500 + UInt64(i)), mic: Signals.frame(mic, seq: 500 + UInt64(i)))
+            XCTAssertNotEqual(engine.state, .active)
+            XCTAssertNotEqual(engine.telemetry.output, "silence", "mic must stay live (frame \(i))")
+        }
+        // Settled on the delay-aligned raw mic, not silence and not AEC output.
+        XCTAssertEqual(engine.telemetry.output, "raw")
+        XCTAssertFalse(lastOut.samples.allSatisfy { $0 == 0 })
+        XCTAssertEqual(lastOut.samples, micStream[micStream.count - 1])
+        // The AEC kept adapting so re-selecting the speakers converges instantly.
+        XCTAssertGreaterThan(aec.captureCalls, 400)
+
+        // Speakers selected again: processing may resume.
+        engine.referenceOutputActive = true
+        for i in 0..<400 {
+            let r = Signals.noise(480, seed: UInt64(i) + 1)
+            _ = engine.process(render: Signals.frame(r, seq: 900 + UInt64(i)), mic: Signals.frame(r.map { 0.5 * $0 }, seq: 900 + UInt64(i)))
+        }
+        XCTAssertEqual(engine.state, .active)
+    }
 }
 
 /// Canceller whose output lags its input by a fixed number of samples, like the

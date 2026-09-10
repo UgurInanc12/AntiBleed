@@ -12,11 +12,12 @@ final class AppState: ObservableObject {
     @AppStorage("antibleed.micUID") var selectedMicUID: String = ""
     @AppStorage("antibleed.outputUID") var selectedOutputUID: String = ""
     @AppStorage("antibleed.autoStart") var autoStart: Bool = true
-    /// Processing only makes sense while macOS actually plays through the
+    /// Echo cancellation only makes sense while macOS actually plays through the
     /// selected reference output (D-020). When the user switches the system
     /// output to something else (headphones, a dock, AirPlay) there is no bleed
-    /// to remove and AEC3 would attenuate the near-end voice, so the pipeline
-    /// pauses and resumes automatically when that output is default again.
+    /// to remove and AEC3 would attenuate the near-end voice, so the engine holds
+    /// raw mic. The microphone keeps working throughout; only the cancellation
+    /// is suspended, and it re-engages when that output is default again.
     @AppStorage("antibleed.pauseWhenOutputNotDefault") var pauseWhenOutputNotDefault: Bool = true
 
     /// Persisted manually (UserDefaults) so the change can be forwarded to the pipeline.
@@ -76,11 +77,11 @@ final class AppState: ObservableObject {
     var driverInstalled: Bool { deviceManager.virtualMicPresent && deviceManager.virtualWriterPresent }
 
     var statusLine: String {
+        if !isRunning { return "Stopped" }
         if isPausedForOutputRoute {
             let name = selectedOutput?.name ?? "the selected speakers"
-            return "Paused: output is not \(name)"
+            return "Raw microphone: output is not \(name)"
         }
-        if !isRunning { return "Stopped" }
         switch pipelineState {
         case .active: return "Removing speaker bleed"
         case .learning: return "Learning echo path"
@@ -122,6 +123,9 @@ final class AppState: ObservableObject {
             isRunning = true
             lastError = pipeline.currentSnapshot().lastError
             permissions.recordSystemAudioOutcome(granted: pipeline.capture.state == .running)
+            // Starting while the system already plays through something else must
+            // come up in raw-mic mode, not with the AEC engaged (D-020).
+            syncOutputRoutePause()
         } catch {
             isRunning = false
             lastError = error.localizedDescription
@@ -133,8 +137,7 @@ final class AppState: ObservableObject {
         pipeline.stop()
         isRunning = false
         pipelineState = .stopped
-        // An explicit Stop clears any automatic pause, so restoring the output
-        // route does not silently restart what the user turned off.
+        // Nothing is running, so the route flag no longer describes anything.
         isPausedForOutputRoute = false
     }
 
@@ -149,10 +152,8 @@ final class AppState: ObservableObject {
     }
 
     private func restart() {
-        // Internal restart: keep the automatic-pause flag, only Stop clears it.
-        let paused = isPausedForOutputRoute
+        // start() re-evaluates the route flag through syncOutputRoutePause().
         stop()
-        isPausedForOutputRoute = paused
         start()
     }
 
@@ -178,25 +179,33 @@ final class AppState: ObservableObject {
         return deviceManager.defaultOutputUID == selectedOutputUID
     }
 
-    /// Suspends processing while the system output is not our reference output
-    /// and resumes it as soon as it is again (D-020). Only automatic pauses are
-    /// resumed: an explicit Stop by the user is never undone here.
+    /// Holds the AEC in BYPASS while the system output is not our reference
+    /// output, and re-enables it as soon as it is again (D-020).
+    ///
+    /// This deliberately does NOT stop the pipeline: the virtual microphone must
+    /// keep carrying the user's voice, otherwise switching to headphones would
+    /// kill the mic in the middle of a call. Only the echo cancellation is
+    /// suspended, because with no bleed to remove AEC3 would attenuate the
+    /// near-end voice by roughly 6 dB.
     private func syncOutputRoutePause() {
-        guard pauseWhenOutputNotDefault else {
+        guard isRunning else {
             if isPausedForOutputRoute { isPausedForOutputRoute = false }
             return
         }
-        if isRunning && !referenceOutputIsDefault {
-            pipeline.stop()
-            isRunning = false
-            pipelineState = .stopped
+        guard pauseWhenOutputNotDefault else {
+            if isPausedForOutputRoute { isPausedForOutputRoute = false }
+            pipeline.setReferenceOutputActive(true)
+            return
+        }
+        let onReference = referenceOutputIsDefault
+        pipeline.setReferenceOutputActive(onReference)
+        if !onReference && !isPausedForOutputRoute {
             isPausedForOutputRoute = true
             let name = selectedOutput?.name ?? "the selected speakers"
-            lastError = "Paused: system output is no longer \(name)."
-        } else if isPausedForOutputRoute && referenceOutputIsDefault {
+            lastError = "Echo cancellation paused: system output is no longer \(name). Microphone still live."
+        } else if onReference && isPausedForOutputRoute {
             isPausedForOutputRoute = false
             lastError = nil
-            start()
         }
     }
 }

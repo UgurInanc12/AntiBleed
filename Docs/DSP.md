@@ -64,10 +64,13 @@ DEGRADED : raw. score > 0.65 and divergence < 0.05 -> LEARNING; 500 ms timeout -
 any      : divergence > 0.3 while ACTIVE/LEARNING -> DEGRADED; route change -> BYPASS immediately
 ```
 
-Above the FSM, the app pauses the whole pipeline while macOS is not playing through
-the selected reference output and resumes when it is again (`AppState.pauseWhenOutputNotDefault`).
-That is the deliberate handling of the headphones case, where AEC3 attenuates the
-near-end voice by ~6 dB.
+Above the FSM, the app tells the engine whether the selected reference output is the
+one macOS currently plays through (`AppState.pauseWhenOutputNotDefault` ->
+`setReferenceOutputActive`). While it is not, the engine holds BYPASS and passes the
+raw microphone through: that is the handling of the headphones case, where AEC3
+attenuates the near-end voice by ~6 dB. The pipeline keeps running throughout, so the
+virtual mic never goes silent mid-call, and the AEC keeps adapting so re-selecting the
+speakers converges immediately.
 
 ## 6. Real-time rules (PLAN 19)
 

@@ -23,7 +23,7 @@ struct SettingsView: View {
                     }
                 Toggle("Start processing when the app launches", isOn: $appState.autoStart)
                 Toggle("Echo cancellation enabled", isOn: $appState.isAECEnabled)
-                Toggle("Pause when macOS plays through another output", isOn: $appState.pauseWhenOutputNotDefault)
+                Toggle("Bypass when macOS plays through another output", isOn: $appState.pauseWhenOutputNotDefault)
             }
             Section("Permissions") {
                 HStack {

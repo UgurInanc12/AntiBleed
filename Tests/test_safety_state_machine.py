@@ -34,7 +34,7 @@ class SafetyStateMachine:
         self.frames_in_state = 0
         self.silent_frames = 0
 
-    def update(self, render_activity, coupling, aec_stats, route_changed=False):
+    def update(self, render_activity, coupling, aec_stats, route_changed=False, aec_available=True):
         if route_changed:
             self.state = "bypass"
             self.frames_in_state = 0
@@ -48,6 +48,13 @@ class SafetyStateMachine:
         if aec_stats.divergentFilterFraction > 0.3 and self.state in ("active", "learning"):
             self.state = "degraded"
             self.frames_in_state = 0
+        # D-020: no usable AEC (toggle off, or the reference output is not the
+        # macOS output) -> raw mic, never silence.
+        if not aec_available and self.state in ("active", "learning", "probing"):
+            was_processed = self.state == "active"
+            self.state = "bypass"
+            self.frames_in_state = 0
+            return "crossfade" if was_processed else "rawMic"
         self.frames_in_state += 1
 
         if self.state == "stopped":
@@ -55,7 +62,7 @@ class SafetyStateMachine:
         elif self.state == "error":
             return "silence"
         elif self.state == "bypass":
-            if not render_activity.is_active:
+            if not render_activity.is_active or not aec_available:
                 return "rawMic"
             self.state = "probing"
             self.frames_in_state = 0
@@ -211,3 +218,28 @@ def test_learning_survives_short_pause():
     for _ in range(100):  # 1 s pause mid-learning
         sm.update(RenderActivity(False), CouplingResult(score=0.0), AECStats())
     assert sm.state == "learning"
+
+
+def test_losing_aec_availability_falls_back_to_raw_never_silence():
+    """D-020 headphones case: the reference output is no longer the macOS output.
+    Processing stops but the microphone must keep flowing."""
+    sm = SafetyStateMachine()
+    sm.state = "active"
+    outs = []
+    for _ in range(200):
+        outs.append(sm.update(RenderActivity(True), CouplingResult(score=0.9, stable_windows=10),
+                              AECStats(), aec_available=False))
+        assert sm.state != "active"
+    assert "silence" not in outs, "the virtual mic must never go silent on a route change"
+    assert sm.state == "bypass"
+    assert outs[-1] == "rawMic"
+
+
+def test_unavailable_aec_never_enters_probing():
+    sm = SafetyStateMachine()
+    sm.state = "bypass"
+    for _ in range(500):
+        out = sm.update(RenderActivity(True), CouplingResult(score=0.95, stable_windows=10),
+                        AECStats(), aec_available=False)
+        assert out == "rawMic"
+        assert sm.state == "bypass"
