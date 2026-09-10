@@ -15,6 +15,15 @@ import Foundation
 ///  - Any route change drops straight to BYPASS with raw mic.
 ///  - AEC keeps adapting in every state; only the exposed signal changes.
 ///  - Every transition between raw and processed is a bounded crossfade.
+///
+/// Far-end silence is deliberately NOT a reason to leave ACTIVE (D-020).
+/// Measured against the real AEC3: while the far end is silent the canceller is
+/// transparent (0.0 dB level delta, 0.985 correlation with the raw mic), so
+/// dropping to BYPASS protects nothing and only produces an audible transition
+/// every time the other side pauses. Coupling evidence decays slowly during
+/// silence, so ACTIVE is held through pauses by `activeSilenceGraceFrames` and
+/// only the real hazards (no coupling while the far end plays, filter
+/// divergence, route change) still force raw mic.
 public final class SafetyStateMachine {
     public private(set) var state: PipelineState = .stopped
     public private(set) var couplingConfidence: Float = 0
@@ -34,24 +43,40 @@ public final class SafetyStateMachine {
     public var degradedRecoverScore: Float = 0.65
     public var degradedTimeoutFrames: Int = 50       // 500 ms
     public var crossfadeFrames: Int = 10              // 100 ms
+    /// How long ACTIVE survives a silent far end before falling back to raw
+    /// (D-020). 0 means "never fall back on silence alone", which is the
+    /// shipped behaviour: with no render to cancel the AEC is transparent
+    /// (measured 0.0 dB delta, 0.985 correlation), so a timeout would only
+    /// manufacture an audible transition and a re-learning climb. The real
+    /// hazards (coupling lost while the far end plays, divergence, route
+    /// change) are handled by their own rules and are not time based.
+    public var activeSilenceGraceFrames: Int = 0
+    /// Same for LEARNING, so a pause mid-learning does not restart the whole
+    /// PROBING -> LEARNING climb. Finite here: LEARNING has not yet proven a
+    /// coupling path, so it must not linger indefinitely on no evidence.
+    public var learningSilenceGraceFrames: Int = 500  // 5 s
+
 
     /// Called on every state change with (from, to). Rate-limited by nature: never per frame.
     public var onTransition: ((PipelineState, PipelineState) -> Void)?
 
     private var ramp = CrossfadeRamp()
     private var rampDirectionToProcessed = true
+    /// Consecutive frames with a silent far end. Reset by any render activity.
+    private var silentFrames = 0
 
     public init() {}
 
-    public func start() { transition(to: .bypass); ramp.reset() }
-    public func stop() { transition(to: .stopped); ramp.reset() }
-    public func fail() { transition(to: .error); ramp.reset() }
+    public func start() { transition(to: .bypass); ramp.reset(); silentFrames = 0 }
+    public func stop() { transition(to: .stopped); ramp.reset(); silentFrames = 0 }
+    public func fail() { transition(to: .error); ramp.reset(); silentFrames = 0 }
 
     public func reset() {
         transition(to: .bypass)
         couplingConfidence = 0
         aecDelayMs = nil
         ramp.reset()
+        silentFrames = 0
     }
 
     /// Per 10 ms frame. Returns which signal to expose for this frame.
@@ -63,10 +88,19 @@ public final class SafetyStateMachine {
         if routeChanged {
             transition(to: .bypass)
             ramp.reset()
+            silentFrames = 0
             return .rawMic
         }
         couplingConfidence = coupling.score
         aecDelayMs = aecStats.valid && aecStats.delayMs >= 0 ? aecStats.delayMs : (coupling.delayMs >= 0 ? coupling.delayMs : nil)
+
+        if renderActivity.isActive {
+            silentFrames = 0
+        } else if silentFrames < Int.max {
+            // Saturating: with no timeout the counter would otherwise run for the
+            // lifetime of the session.
+            silentFrames &+= 1
+        }
 
         // Hard fail-safe: diverging filter while processed audio is exposed.
         if aecStats.divergentFilterFraction > hardDivergence && (state == .active || state == .learning) {
@@ -92,7 +126,12 @@ public final class SafetyStateMachine {
             return .rawMic
 
         case .learning:
-            if !renderActivity.isActive || coupling.score < learningAbortScore {
+            // A pause in the far end is not evidence against coupling; keep
+            // learning through it (D-020) and only give up on a long silence.
+            if silentFrames > learningSilenceGraceFrames {
+                transition(to: .bypass); return .rawMic
+            }
+            if renderActivity.isActive && coupling.score < learningAbortScore {
                 transition(to: .bypass); return .rawMic
             }
             if coupling.score > activeEnterScore
@@ -105,12 +144,25 @@ public final class SafetyStateMachine {
             return .rawMic
 
         case .active:
-            if !renderActivity.isActive {
+            // Far-end silence keeps ACTIVE: the AEC is transparent with no render
+            // to cancel, so switching back to raw would only cause an audible
+            // transition (D-020). With activeSilenceGraceFrames == 0 silence
+            // alone never releases the state.
+            if activeSilenceGraceFrames > 0 && silentFrames > activeSilenceGraceFrames {
                 transition(to: .bypass)
                 beginRamp(toProcessed: false)
                 return rampedOutput(idle: .rawMic)
             }
-            if coupling.score < activeExitScore || aecStats.divergentFilterFraction > degradedDivergence {
+            // Coupling is only re-judged while the far end actually plays; during
+            // silence the score decays for lack of evidence, not for lack of an
+            // echo path.
+            if renderActivity.isActive
+                && (coupling.score < activeExitScore || aecStats.divergentFilterFraction > degradedDivergence) {
+                transition(to: .degraded)
+                beginRamp(toProcessed: false)
+                return rampedOutput(idle: .rawMic)
+            }
+            if !renderActivity.isActive && aecStats.divergentFilterFraction > degradedDivergence {
                 transition(to: .degraded)
                 beginRamp(toProcessed: false)
                 return rampedOutput(idle: .rawMic)
@@ -125,6 +177,7 @@ public final class SafetyStateMachine {
             return rampedOutput(idle: .rawMic)
         }
     }
+
 
     // MARK: - Internals
 

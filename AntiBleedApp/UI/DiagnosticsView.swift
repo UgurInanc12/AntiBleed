@@ -31,6 +31,10 @@ struct DiagnosticsView: View {
                     row("ERL / ERLE", String(format: "%.1f / %.1f dB", s.engine.aec.echoReturnLoss, s.engine.aec.echoReturnLossEnhancement))
                     row("Divergent fraction", String(format: "%.3f", s.engine.aec.divergentFilterFraction))
                     row("Residual echo", String(format: "%.2f", s.engine.aec.residualEchoLikelihood))
+                    row("Path alignment", s.engine.pathAlignmentSamples > 0
+                        ? String(format: "%d samples (%.2f ms)", s.engine.pathAlignmentSamples,
+                                 Double(s.engine.pathAlignmentSamples) / AudioConstants.sampleRate * 1000)
+                        : "none (no real AEC)")
                 }
                 Divider()
                 Group {

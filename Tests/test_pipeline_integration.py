@@ -42,6 +42,10 @@ class FSM:
         self.ramp_total = 10
         self.ramp_pos = None
         self.ramp_to_processed = True
+        self.silent_frames = 0
+        # D-020: far-end silence never releases ACTIVE (0 = no timeout).
+        self.active_silence_grace = 0
+        self.learning_silence_grace = 500
 
     def _go(self, s):
         if s != self.state:
@@ -65,7 +69,9 @@ class FSM:
     def update(self, render_active, score, stable, div, aec_available=True, route_changed=False):
         if route_changed:
             self._go("bypass"); self.ramp_pos = None
+            self.silent_frames = 0
             return "raw"
+        self.silent_frames = 0 if render_active else self.silent_frames + 1
         if div > 0.3 and self.state in ("active", "learning"):
             self._go("degraded"); self._ramp(False)
         self.frames += 1
@@ -81,16 +87,20 @@ class FSM:
                 self._go("learning")
             return "raw"
         if s == "learning":
-            if not render_active or score < 0.3:
+            if self.silent_frames > self.learning_silence_grace:
+                self._go("bypass"); return "raw"
+            if render_active and score < 0.3:
                 self._go("bypass"); return "raw"
             if score > 0.7 and div < 0.1 and self.frames > 30:
                 self._go("active"); self._ramp(True)
                 return self._out("aec")
             return "raw"
         if s == "active":
-            if not render_active:
+            if self.active_silence_grace > 0 and self.silent_frames > self.active_silence_grace:
                 self._go("bypass"); self._ramp(False); return self._out("raw")
-            if score < 0.35 or div > 0.2:
+            if render_active and (score < 0.35 or div > 0.2):
+                self._go("degraded"); self._ramp(False); return self._out("raw")
+            if not render_active and div > 0.2:
                 self._go("degraded"); self._ramp(False); return self._out("raw")
             return self._out("aec")
         if s == "degraded":
@@ -118,14 +128,20 @@ def equal_power(a, b, p):
     return math.cos(p * math.pi / 2) * a + math.sin(p * math.pi / 2) * b
 
 
-def run_pipeline(render, mic, aec_stats_stream=None, route_change_at=None):
+def run_pipeline(render, mic, aec_stats_stream=None, route_change_at=None, align=True):
     """Runs the real AEC once over the whole stream (as the live engine does frame by
     frame, AEC is stateful and order-preserving), then walks the frames through the
-    detector + FSM exactly like AntiBleedEngine.process()."""
+    detector + FSM exactly like AntiBleedEngine.process().
+
+    With align=True the raw candidate is delayed by the measured AEC latency, as
+    AntiBleedEngine does (D-020), so the two candidates describe the same instant.
+    """
     cleaned, stats, frame_stats = run_aec(render, mic, per_frame=True)
     if not stats["real_aec"]:
         pytest.skip("runner built without WebRTC")
-    n = min(len(render), len(mic), len(cleaned)) // FRAME
+    lat = measure_aec_latency() if align else 0
+    raw = np.concatenate([np.zeros(lat, dtype=np.float32), mic])[: len(mic)] if lat else mic
+    n = min(len(render), len(raw), len(cleaned)) // FRAME
     det = CouplingDetector()
     ra = RenderActivity()
     fsm = FSM()
@@ -135,6 +151,7 @@ def run_pipeline(render, mic, aec_stats_stream=None, route_change_at=None):
     for i in range(n):
         r = render[i * FRAME:(i + 1) * FRAME]
         m = mic[i * FRAME:(i + 1) * FRAME]
+        a = raw[i * FRAME:(i + 1) * FRAME]
         c = cleaned[i * FRAME:(i + 1) * FRAME]
         fs = frame_stats[i]
         aec_stats = {"valid": bool(fs["valid"]), "delayMs": fs["delay_ms"], "erleDb": fs["erle_db"],
@@ -147,13 +164,39 @@ def run_pipeline(render, mic, aec_stats_stream=None, route_change_at=None):
         sel = fsm.update(active, last["score"], last["stable_windows"], div,
                          route_changed=(route_change_at is not None and i == route_change_at))
         if sel == "raw":
-            out[i * FRAME:(i + 1) * FRAME] = m
+            out[i * FRAME:(i + 1) * FRAME] = a
         elif sel == "aec":
             out[i * FRAME:(i + 1) * FRAME] = c
         else:
-            out[i * FRAME:(i + 1) * FRAME] = equal_power(m, c, sel[1])
+            out[i * FRAME:(i + 1) * FRAME] = equal_power(a, c, sel[1])
         states.append(fsm.state); outputs.append(sel if isinstance(sel, str) else "xfade")
     return out, cleaned, states, outputs, fsm, stats
+
+
+_AEC_LATENCY = None
+
+
+def measure_aec_latency():
+    """Mirrors EchoCancellerLatency.measure: a short noise burst with a silent
+    render, correlated input against output. Cached per session."""
+    global _AEC_LATENCY
+    if _AEC_LATENCY is not None:
+        return _AEC_LATENCY
+    rng = np.random.default_rng(20260911)
+    n = FRAME * 20
+    cap = (rng.standard_normal(n) * 0.05).astype(np.float32)
+    out, _ = run_aec(np.zeros(n, dtype=np.float32), cap)
+    max_lag = 1440
+    a = cap[: n - max_lag].astype(np.float64)
+    best, best_lag = 0.0, 0
+    for lag in range(max_lag + 1):
+        b = out[lag: lag + len(a)].astype(np.float64)
+        d = np.sqrt(float(np.dot(a, a) * np.dot(b, b))) or 1e-12
+        c = float(np.dot(a, b) / d)
+        if abs(c) > abs(best):
+            best, best_lag = c, lag
+    _AEC_LATENCY = best_lag
+    return best_lag
 
 
 # ------------------------------------------------------------------ scenarios
@@ -180,7 +223,10 @@ def test_scenario_2_headphones_no_coupling_stays_raw():
     print(f"S2: states {sorted(set(states))}, outputs {sorted(set(outputs))}")
     assert "active" not in states and "learning" not in states
     assert set(outputs) == {"raw"}
-    np.testing.assert_array_equal(out[: len(states) * FRAME], mic[: len(states) * FRAME])
+    n = len(states) * FRAME
+    lat = measure_aec_latency()
+    # The raw candidate is the mic delayed by the AEC latency (D-020).
+    np.testing.assert_array_equal(out[lat:n], mic[: n - lat])
 
 
 def test_scenario_3_nothing_playing_is_transparent():
@@ -189,7 +235,9 @@ def test_scenario_3_nothing_playing_is_transparent():
     out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic)
     assert set(states) == {"bypass"}
     assert set(outputs) == {"raw"}
-    np.testing.assert_array_equal(out[: len(states) * FRAME], mic[: len(states) * FRAME])
+    n = len(states) * FRAME
+    lat = measure_aec_latency()
+    np.testing.assert_array_equal(out[lat:n], mic[: n - lat])
 
 
 def test_scenario_4_double_talk_keeps_voice_removes_bleed():
@@ -227,10 +275,64 @@ def test_scenario_5_route_change_drops_to_raw_then_reactivates():
 def test_invariant_output_is_always_convex_mix_of_mic_and_cleaned():
     render = speech_like(3.0, seed=8)
     mic = echo_of(render, room_ir(int(0.03 * SR), 0.5))
-    out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic)
+    out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic, align=False)
     n = len(states) * FRAME
     lo = np.minimum(mic[:n], cleaned[:n]) - 1e-6
     hi = np.maximum(mic[:n], cleaned[:n]) + 1e-6
     # equal-power crossfade can exceed the linear hull by at most sqrt(2) in magnitude;
     # bound with that factor.
     assert np.all(np.abs(out[:n]) <= np.maximum(np.abs(lo), np.abs(hi)) * math.sqrt(2) + 1e-6)
+
+
+# --------------------------------------------------- D-020: continuous operation
+def test_scenario_6_pause_in_far_end_does_not_drop_processing():
+    """The reported bug: the far end goes quiet, the app drops to BYPASS, and the
+    audio skips on the way back into LEARNING/ACTIVE. Processing must survive a
+    pause instead, so the virtual mic never changes source mid-call."""
+    speech = speech_like(20.0, seed=9)
+    render = np.zeros_like(speech)
+    render[: 6 * SR] = speech[: 6 * SR]          # far end talks
+    render[14 * SR:] = speech[14 * SR:]          # ... pauses 8 s ... talks again
+    ir = room_ir(int(0.045 * SR), gain=0.5)
+    mic = (speech_like(20.0, seed=10, burst_hz=0.7) + echo_of(render, ir)).astype(np.float32)
+
+    out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic)
+    silent = slice(7 * SR // FRAME, 13 * SR // FRAME)  # well inside the pause
+    print(f"S6: transitions {fsm.transitions}, states during pause {sorted(set(states[silent]))}")
+    assert "active" in states, "must reach ACTIVE while the far end plays"
+    # No state churn during the pause: whatever it was at the pause, it stays.
+    assert len(set(states[silent])) == 1
+    assert set(states[silent]) == {"active"}
+    # And no source switching either.
+    assert set(outputs[silent]) == {"aec"}
+
+
+def test_scenario_7_switching_source_does_not_shift_the_timeline():
+    """Why the skip was audible: the raw and AEC candidates must describe the
+    same instant, otherwise every switch splices two different points in time.
+
+    Measured with a silent far end, where the AEC is transparent, so the only
+    difference between the two candidates is the time shift under test.
+    """
+    mic = speech_like(6.0, seed=12, burst_hz=0.8)
+    render = np.zeros_like(mic)
+    cleaned, stats, _ = run_aec(render, mic, per_frame=True)
+    if not stats["real_aec"]:
+        pytest.skip("runner built without WebRTC")
+    lat = measure_aec_latency()
+    raw = np.concatenate([np.zeros(lat, dtype=np.float32), mic])[: len(mic)]
+    n = min(len(raw), len(cleaned))
+
+    def corr(a, b):
+        a = a.astype(np.float64); b = b.astype(np.float64)
+        d = math.sqrt(float(np.dot(a, a) * np.dot(b, b))) or 1e-12
+        return float(np.dot(a, b) / d)
+
+    aligned = corr(raw[lat:n], cleaned[lat:n])
+    unaligned = corr(mic[:n], cleaned[:n])
+    print(f"S7: latency {lat} samples ({lat / SR * 1000:.2f} ms), "
+          f"aligned corr={aligned:.3f}, unaligned corr={unaligned:.3f}")
+    assert lat > 0, "the AEC path has a latency that must be compensated"
+    assert aligned > 0.95, "aligned raw and AEC candidates must describe the same instant"
+    # The gap between the two is exactly the discontinuity a switch used to cause.
+    assert aligned > unaligned + 0.3

@@ -184,3 +184,101 @@ final class EngineTests: XCTestCase {
         XCTAssertTrue(out.samples.allSatisfy { $0 == 0 })
     }
 }
+
+/// Canceller whose output lags its input by a fixed number of samples, like the
+/// real AEC3 (measured at 430 samples / 9 ms). Cancels nothing; it exists to
+/// exercise the raw-path alignment (D-020).
+final class LaggingCanceller: EchoCanceller {
+    let latency: Int
+    private var history: [Float]
+    init(latency: Int) {
+        self.latency = latency
+        // Pre-seeded with `latency` zeros so the very first frame already emits
+        // the correct partial output, exactly like a delay line.
+        history = [Float](repeating: 0, count: latency)
+    }
+    var isRealAEC: Bool { true }
+    func processRender(_ render: [Float]) {}
+    func processCapture(_ capture: [Float]) -> [Float] {
+        history.append(contentsOf: capture)
+        let start = history.count - capture.count - latency
+        let out = Array(history[start..<(start + capture.count)])
+        if history.count > capture.count + latency + 4800 {
+            history.removeFirst(history.count - (capture.count + latency))
+        }
+        return out
+    }
+    func stats() -> AECStats { AECStats(delayMs: 0, delayStddevMs: 1, echoReturnLossEnhancement: 20, valid: true) }
+    func reset() { history = [Float](repeating: 0, count: latency) }
+}
+
+final class PathAlignmentTests: XCTestCase {
+    func testDelayLineDelaysExactly() {
+        var d = DelayLine(delaySamples: 3)
+        XCTAssertEqual(d.process([1, 2, 3, 4, 5]), [0, 0, 0, 1, 2])
+        XCTAssertEqual(d.process([6, 7, 8]), [3, 4, 5])
+    }
+
+    func testZeroDelayIsIdentity() {
+        var d = DelayLine(delaySamples: 0)
+        XCTAssertEqual(d.process([1, 2, 3]), [1, 2, 3])
+    }
+
+    func testLatencyMeasurementFindsTheLag() {
+        for latency in [0, 96, 430, 960] {
+            let measured = EchoCancellerLatency.measure(LaggingCanceller(latency: latency))
+            XCTAssertEqual(measured, latency, "latency \(latency) measured as \(measured)")
+        }
+    }
+
+    func testPassthroughCancellerIsNotCalibrated() {
+        XCTAssertEqual(EchoCancellerLatency.measure(PassthroughCanceller()), 0)
+    }
+
+    /// The point of the alignment: raw and AEC candidates describe the same
+    /// instant, so a Bypass <-> Active switch is a gain change, not a time jump.
+    func testEngineAlignsRawPathToAECLatency() {
+        let latency = 430
+        let engine = AntiBleedEngine(aec: LaggingCanceller(latency: latency))
+        XCTAssertEqual(engine.pathAlignmentSamples, latency)
+        engine.start()
+
+        var micStream: [Float] = []
+        var rawOut: [Float] = []
+        var aecOut: [Float] = []
+        for i in 0..<200 {
+            let mic = Signals.noise(480, seed: UInt64(i) + 3_000)
+            micStream.append(contentsOf: mic)
+            let silence = [Float](repeating: 0, count: 480)
+            _ = engine.process(render: Signals.frame(silence, seq: UInt64(i)), mic: Signals.frame(mic, seq: UInt64(i)))
+            // Compare the two candidates directly rather than the FSM's pick.
+            rawOut.append(contentsOf: engine.rawCandidateForTesting)
+            aecOut.append(contentsOf: engine.aecCandidateForTesting)
+        }
+        // Both candidates must be the same signal at the same offset.
+        let n = rawOut.count
+        var maxDiff: Float = 0
+        for i in 0..<n { maxDiff = max(maxDiff, abs(rawOut[i] - aecOut[i])) }
+        XCTAssertLessThan(maxDiff, 1e-6, "raw and AEC candidates are not time aligned")
+        // And that offset is the AEC latency behind the microphone.
+        XCTAssertEqual(Array(rawOut[latency..<(latency + 480)]), Array(micStream[0..<480]))
+    }
+
+    func testAlignmentSurvivesRouteChange() {
+        let engine = AntiBleedEngine(aec: LaggingCanceller(latency: 240))
+        engine.start()
+        for i in 0..<50 {
+            let mic = Signals.noise(480, seed: UInt64(i))
+            _ = engine.process(render: Signals.frame([Float](repeating: 0, count: 480), seq: UInt64(i)),
+                               mic: Signals.frame(mic, seq: UInt64(i)))
+        }
+        engine.notifyRouteChanged()
+        XCTAssertEqual(engine.pathAlignmentSamples, 240)
+        // The delay line was cleared, so the first frames after the change are the
+        // flushed zeros, not stale audio from before the route change.
+        let mic = Signals.noise(480, seed: 12_345)
+        let out = engine.process(render: Signals.frame([Float](repeating: 0, count: 480), seq: 51),
+                                 mic: Signals.frame(mic, seq: 51))
+        XCTAssertTrue(out.samples[0..<240].allSatisfy { $0 == 0 })
+    }
+}

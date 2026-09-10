@@ -20,6 +20,56 @@ final class SafetyStateMachineTests: XCTestCase {
         }
     }
 
+    /// D-020: a pause in the far end must NOT drop ACTIVE. With no render to
+    /// cancel the AEC is transparent, so leaving ACTIVE only produces an audible
+    /// transition on every conversational pause. There is no timeout at all.
+    func testActiveSurvivesFarEndSilence() {
+        let sm = SafetyStateMachine(); sm.start()
+        for _ in 0..<80 { _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats()) }
+        XCTAssertEqual(sm.state, .active)
+        // 10 minutes of silence with the coupling score decayed to nothing.
+        for _ in 0..<60_000 {
+            let out = sm.update(renderActivity: RenderActivity(isActive: false), coupling: CouplingResult(score: 0, stableWindows: 0), aecStats: stats())
+            XCTAssertEqual(sm.state, .active)
+            XCTAssertEqual(out, .aecProcessed)
+        }
+        // Far end resumes: still ACTIVE, no transition was spent.
+        XCTAssertEqual(sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats()), .aecProcessed)
+        // stopped->bypass, bypass->probing, probing->learning, learning->active.
+        // The whole silent stretch added none of its own.
+        XCTAssertEqual(sm.transitionCount, 4)
+    }
+
+    /// The silence timeout is opt-in: 0 by default, honoured when configured.
+    func testActiveSilenceTimeoutIsOptIn() {
+        XCTAssertEqual(SafetyStateMachine().activeSilenceGraceFrames, 0)
+        let sm = SafetyStateMachine(); sm.start()
+        sm.activeSilenceGraceFrames = 100
+        for _ in 0..<80 { _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats()) }
+        XCTAssertEqual(sm.state, .active)
+        for _ in 0..<150 { _ = sm.update(renderActivity: RenderActivity(isActive: false), coupling: CouplingResult(score: 0), aecStats: stats()) }
+        XCTAssertEqual(sm.state, .bypass)
+    }
+
+    /// The hazard that Bypass really exists for still works: far end playing
+    /// while coupling collapses (user plugged in headphones) leaves ACTIVE.
+    func testActiveLeavesWhenCouplingLostWhileFarEndPlays() {
+        let sm = SafetyStateMachine(); sm.start()
+        for _ in 0..<80 { _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats()) }
+        XCTAssertEqual(sm.state, .active)
+        _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.05, stableWindows: 0), aecStats: stats())
+        XCTAssertEqual(sm.state, .degraded)
+    }
+
+    /// Divergence must still fail safe even while the far end is silent.
+    func testDivergenceDuringSilenceStillLeavesActive() {
+        let sm = SafetyStateMachine(); sm.start()
+        for _ in 0..<80 { _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats()) }
+        XCTAssertEqual(sm.state, .active)
+        _ = sm.update(renderActivity: RenderActivity(isActive: false), coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats(div: 0.5))
+        XCTAssertEqual(sm.state, .degraded)
+    }
+
     func testFullPathToActiveWithCrossfade() {
         let sm = SafetyStateMachine(); sm.start()
         var outputs: [OutputSelection] = []

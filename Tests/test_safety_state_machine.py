@@ -24,17 +24,27 @@ class SafetyStateMachine:
         self.state = "stopped"
         self.frames_in_state = 0
         self.coupling_confidence = 0.0
+        self.silent_frames = 0
+        # D-020: far-end silence never releases ACTIVE (0 = no timeout).
+        self.active_silence_grace_frames = 0
+        self.learning_silence_grace_frames = 500
 
     def reset(self):
         self.state = "bypass"
         self.frames_in_state = 0
+        self.silent_frames = 0
 
     def update(self, render_activity, coupling, aec_stats, route_changed=False):
         if route_changed:
             self.state = "bypass"
             self.frames_in_state = 0
+            self.silent_frames = 0
             return "rawMic"
         self.coupling_confidence = coupling.score
+        if render_activity.is_active:
+            self.silent_frames = 0
+        else:
+            self.silent_frames += 1
         if aec_stats.divergentFilterFraction > 0.3 and self.state in ("active", "learning"):
             self.state = "degraded"
             self.frames_in_state = 0
@@ -59,7 +69,10 @@ class SafetyStateMachine:
                 self.frames_in_state = 0
             return "rawMic"
         elif self.state == "learning":
-            if not render_activity.is_active or coupling.score < 0.3:
+            if self.silent_frames > self.learning_silence_grace_frames:
+                self.state = "bypass"
+                return "rawMic"
+            if render_activity.is_active and coupling.score < 0.3:
                 self.state = "bypass"
                 return "rawMic"
             if coupling.score > 0.7 and aec_stats.divergentFilterFraction < 0.1 and self.frames_in_state > 30:
@@ -68,10 +81,14 @@ class SafetyStateMachine:
                 return "crossfade"
             return "rawMic"
         elif self.state == "active":
-            if not render_activity.is_active:
+            if self.active_silence_grace_frames > 0 and self.silent_frames > self.active_silence_grace_frames:
                 self.state = "bypass"
                 return "crossfade"
-            if coupling.score < 0.35 or aec_stats.divergentFilterFraction > 0.2:
+            if render_activity.is_active and (coupling.score < 0.35 or aec_stats.divergentFilterFraction > 0.2):
+                self.state = "degraded"
+                self.frames_in_state = 0
+                return "crossfade"
+            if not render_activity.is_active and aec_stats.divergentFilterFraction > 0.2:
                 self.state = "degraded"
                 self.frames_in_state = 0
                 return "crossfade"
@@ -148,3 +165,49 @@ def test_output_never_inverted_render():
     for _ in range(20):
         out = sm.update(RenderActivity(True), CouplingResult(score=0.5), AECStats())
         assert out in valid
+
+
+def test_active_survives_far_end_silence():
+    """D-020: a pause in the far end must not release ACTIVE. With no render to
+    cancel the AEC is transparent (measured: 0.0 dB delta, 0.985 correlation),
+    so falling back to raw would only add an audible transition per pause."""
+    sm = SafetyStateMachine()
+    sm.state = "active"
+    for _ in range(60000):  # 10 minutes of silence, coupling evidence fully decayed
+        out = sm.update(RenderActivity(False), CouplingResult(score=0.0), AECStats())
+        assert sm.state == "active"
+        assert out == "aecProcessed"
+
+
+def test_active_silence_timeout_is_opt_in():
+    """The timeout is off by default (0) and only fires when configured."""
+    assert SafetyStateMachine().active_silence_grace_frames == 0
+    sm = SafetyStateMachine()
+    sm.state = "active"
+    sm.active_silence_grace_frames = 100
+    for _ in range(150):
+        sm.update(RenderActivity(False), CouplingResult(score=0.0), AECStats())
+    assert sm.state == "bypass"
+
+
+def test_active_leaves_when_coupling_lost_while_far_end_plays():
+    """The real hazard Bypass exists for: headphones plugged in mid-call."""
+    sm = SafetyStateMachine()
+    sm.state = "active"
+    sm.update(RenderActivity(True), CouplingResult(score=0.05), AECStats())
+    assert sm.state == "degraded"
+
+
+def test_divergence_during_silence_still_leaves_active():
+    sm = SafetyStateMachine()
+    sm.state = "active"
+    sm.update(RenderActivity(False), CouplingResult(score=0.9), AECStats(div_frac=0.5))
+    assert sm.state == "degraded"
+
+
+def test_learning_survives_short_pause():
+    sm = SafetyStateMachine()
+    sm.state = "learning"
+    for _ in range(100):  # 1 s pause mid-learning
+        sm.update(RenderActivity(False), CouplingResult(score=0.0), AECStats())
+    assert sm.state == "learning"

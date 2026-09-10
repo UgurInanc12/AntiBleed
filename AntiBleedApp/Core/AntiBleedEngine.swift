@@ -28,6 +28,8 @@ public struct EngineTelemetry: Equatable {
     public var sync: AudioSynchronizer.SyncStats = AudioSynchronizer.SyncStats()
     public var framesProcessed: UInt64 = 0
     public var transitions: UInt64 = 0
+    /// Samples the raw path is delayed by to match the AEC path (D-020).
+    public var pathAlignmentSamples: Int = 0
     public init() {}
 }
 
@@ -43,6 +45,10 @@ public struct EngineTelemetry: Equatable {
 /// The hard invariant (D-008) is structural: the only candidate outputs are the
 /// raw mic frame, the AEC output frame, a convex combination of the two, or
 /// zeros. The render frame is never a candidate.
+///
+/// The raw candidate is delayed by the AEC's own processing latency (D-020) so
+/// both candidates describe the same instant. Without that, every switch or
+/// crossfade splices two points in time and is heard as a skip.
 public final class AntiBleedEngine {
     public let aec: EchoCanceller
     public let synchronizer: AudioSynchronizer
@@ -57,15 +63,40 @@ public final class AntiBleedEngine {
     /// Run the (comparatively expensive) coupling analysis every N frames (10 = 100 ms).
     public var couplingEveryNFrames: Int = 10
 
+    /// Samples the raw path is delayed by to match the AEC path. Measured from
+    /// the canceller at init; 0 means "no real AEC, nothing to align".
+    public private(set) var pathAlignmentSamples: Int = 0
+
     public private(set) var telemetry = EngineTelemetry()
     private var lastCoupling = CouplingResult()
     private var frameCounter: UInt64 = 0
     private var pendingRouteChange = false
+    private var rawDelay = DelayLine()
+    private var lastAlignedRaw: [Float] = []
+    private var lastCleaned: [Float] = []
+
+    /// Last frame's raw candidate (delay-aligned mic). Exposed for tests that
+    /// verify the two candidates describe the same instant.
+    public var rawCandidateForTesting: [Float] { lastAlignedRaw }
+    /// Last frame's AEC candidate.
+    public var aecCandidateForTesting: [Float] { lastCleaned }
 
     public init(aec: EchoCanceller, synchronizer: AudioSynchronizer = AudioSynchronizer()) {
         self.aec = aec
         self.synchronizer = synchronizer
+        alignPaths()
     }
+
+    /// Measures the canceller's input-to-output latency and delays the raw path
+    /// by the same amount. Safe to call again after a route change; the AEC is
+    /// reset by the measurement itself.
+    public func alignPaths() {
+        let measured = EchoCancellerLatency.measure(aec)
+        pathAlignmentSamples = measured
+        rawDelay.setDelay(measured)
+        telemetry.pathAlignmentSamples = measured
+    }
+
 
     public var state: PipelineState { fsm.state }
 
@@ -88,6 +119,7 @@ public final class AntiBleedEngine {
         coupling.reset()
         renderActivity.reset()
         synchronizer.reset()
+        rawDelay.reset()
         lastCoupling = CouplingResult()
     }
 
@@ -99,6 +131,13 @@ public final class AntiBleedEngine {
         aec.processRender(render.samples)
         let cleaned = aec.processCapture(mic.samples)
         let aecStats = aec.stats()
+
+        // Raw candidate delayed to the AEC's latency so both candidates describe
+        // the same instant (D-020). Detection below still uses the undelayed mic:
+        // it is compared against the undelayed render.
+        let alignedRaw = rawDelay.process(mic.samples)
+        lastAlignedRaw = alignedRaw
+        lastCleaned = cleaned
 
         // 3. Detectors.
         let activity = renderActivity.update(renderRmsDb: render.rmsDb)
@@ -116,16 +155,16 @@ public final class AntiBleedEngine {
                                    aecAvailable: aecEnabled && aec.isRealAEC,
                                    routeChanged: routeChanged)
 
-        // 5. Output selection. Candidates: mic, cleaned, mix(mic, cleaned), zeros.
+        // 5. Output selection. Candidates: aligned raw mic, cleaned, mix, zeros.
         let outSamples: [Float]
         let outName: String
         switch selection {
         case .rawMic:
-            outSamples = mic.samples; outName = "raw"
+            outSamples = alignedRaw; outName = "raw"
         case .aecProcessed:
             outSamples = cleaned; outName = "aec"
         case .crossfade(let p):
-            outSamples = Crossfade.equalPower(mic.samples, cleaned, progress: p); outName = "xfade"
+            outSamples = Crossfade.equalPower(alignedRaw, cleaned, progress: p); outName = "xfade"
         case .silence:
             outSamples = [Float](repeating: 0, count: mic.samples.count); outName = "silence"
         }
@@ -146,6 +185,7 @@ public final class AntiBleedEngine {
         telemetry.sync = synchronizer.stats
         telemetry.framesProcessed = frameCounter
         telemetry.transitions = fsm.transitionCount
+        telemetry.pathAlignmentSamples = pathAlignmentSamples
         return out
     }
 

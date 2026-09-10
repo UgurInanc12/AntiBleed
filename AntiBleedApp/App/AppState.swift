@@ -12,6 +12,12 @@ final class AppState: ObservableObject {
     @AppStorage("antibleed.micUID") var selectedMicUID: String = ""
     @AppStorage("antibleed.outputUID") var selectedOutputUID: String = ""
     @AppStorage("antibleed.autoStart") var autoStart: Bool = true
+    /// Processing only makes sense while macOS actually plays through the
+    /// selected reference output (D-020). When the user switches the system
+    /// output to something else (headphones, a dock, AirPlay) there is no bleed
+    /// to remove and AEC3 would attenuate the near-end voice, so the pipeline
+    /// pauses and resumes automatically when that output is default again.
+    @AppStorage("antibleed.pauseWhenOutputNotDefault") var pauseWhenOutputNotDefault: Bool = true
 
     /// Persisted manually (UserDefaults) so the change can be forwarded to the pipeline.
     @Published var isAECEnabled: Bool {
@@ -26,6 +32,9 @@ final class AppState: ObservableObject {
     @Published var isRunning = false
     @Published var lastError: String?
     @Published var recentTransitions: [String] = []
+    /// True while processing is suspended because the selected reference output
+    /// is not the current macOS output (D-020). The pipeline resumes by itself.
+    @Published var isPausedForOutputRoute = false
 
     let deviceManager = DeviceManager()
     let permissions = Permissions()
@@ -67,6 +76,10 @@ final class AppState: ObservableObject {
     var driverInstalled: Bool { deviceManager.virtualMicPresent && deviceManager.virtualWriterPresent }
 
     var statusLine: String {
+        if isPausedForOutputRoute {
+            let name = selectedOutput?.name ?? "the selected speakers"
+            return "Paused: output is not \(name)"
+        }
         if !isRunning { return "Stopped" }
         switch pipelineState {
         case .active: return "Removing speaker bleed"
@@ -120,6 +133,9 @@ final class AppState: ObservableObject {
         pipeline.stop()
         isRunning = false
         pipelineState = .stopped
+        // An explicit Stop clears any automatic pause, so restoring the output
+        // route does not silently restart what the user turned off.
+        isPausedForOutputRoute = false
     }
 
     func selectMic(_ uid: String) {
@@ -133,7 +149,10 @@ final class AppState: ObservableObject {
     }
 
     private func restart() {
+        // Internal restart: keep the automatic-pause flag, only Stop clears it.
+        let paused = isPausedForOutputRoute
         stop()
+        isPausedForOutputRoute = paused
         start()
     }
 
@@ -148,6 +167,36 @@ final class AppState: ObservableObject {
             lastError = "Output device disconnected; switched to system default."
             selectedOutputUID = deviceManager.defaultOutputUID ?? ""
             if isRunning { restart() }
+        }
+        syncOutputRoutePause()
+    }
+
+    /// True when macOS currently plays through the output we use as the AEC
+    /// reference. With no output selected there is no reference and no bleed.
+    var referenceOutputIsDefault: Bool {
+        guard !selectedOutputUID.isEmpty else { return false }
+        return deviceManager.defaultOutputUID == selectedOutputUID
+    }
+
+    /// Suspends processing while the system output is not our reference output
+    /// and resumes it as soon as it is again (D-020). Only automatic pauses are
+    /// resumed: an explicit Stop by the user is never undone here.
+    private func syncOutputRoutePause() {
+        guard pauseWhenOutputNotDefault else {
+            if isPausedForOutputRoute { isPausedForOutputRoute = false }
+            return
+        }
+        if isRunning && !referenceOutputIsDefault {
+            pipeline.stop()
+            isRunning = false
+            pipelineState = .stopped
+            isPausedForOutputRoute = true
+            let name = selectedOutput?.name ?? "the selected speakers"
+            lastError = "Paused: system output is no longer \(name)."
+        } else if isPausedForOutputRoute && referenceOutputIsDefault {
+            isPausedForOutputRoute = false
+            lastError = nil
+            start()
         }
     }
 }

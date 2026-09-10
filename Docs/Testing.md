@@ -9,7 +9,7 @@
 | DSP + FSM mirrors, fixtures | pytest (`Tests/test_*.py`) | yes | yes | yes |
 | Real AEC3 offline cases A-J | pytest + `build/aec/aec_offline` | yes | yes | yes |
 | 5 live scenarios (AEC3 + detector + FSM) | `Tests/test_pipeline_integration.py` | yes | yes | yes |
-| Swift core (engine, FSM, detector, sync, rings) | `swift test` (43 XCTest) | yes (`Scripts/swift-test-windows.cmd`) | yes | yes |
+| Swift core (engine, FSM, detector, sync, rings) | `swift test` (53 XCTest) | yes (`Scripts/swift-test-windows.cmd`) | yes | yes |
 | AECBridge sanity | `ctest` in `build/aec` | yes | yes | yes |
 | Driver ring policy | `ctest` in `build/driver` | yes | yes | yes |
 | HAL driver install, tap permission, Discord | manual + `Scripts/install-driver.sh` | no | no | **required** |
@@ -22,12 +22,12 @@
 env -u PYTHONPATH uv venv .venv && env -u PYTHONPATH uv pip install -r Tests/requirements.txt
 cmake -S AECBridge -B build/aec -G "Visual Studio 16 2019" -A x64 && cmake --build build/aec --config Release
 cmake -S AntiBleedDriver -B build/driver -G "Visual Studio 16 2019" -A x64 && cmake --build build/driver --config Release
-.venv/Scripts/pytest -q                      # 84 tests
+.venv/Scripts/pytest -q                      # 91 tests
 build/aec/Release/AECBridgeTests.exe          # AEC3 sanity
 build/driver/Release/SharedRingBufferTests.exe
 
 # Swift core (Windows, winget Swift 6.3 + VS2019 Build Tools + Windows SDK 10.0.22621)
-Scripts/swift-test-windows.cmd                # 43 tests
+Scripts/swift-test-windows.cmd                # 53 tests
 
 # macOS: everything
 Scripts/bootstrap-macos.sh && Scripts/build-app.sh release
@@ -74,9 +74,17 @@ Acceptance: bleed reduced by >= 15 dB on speakers; headphones stay in BYPASS; do
 
 ## 5. Mac gate checklist (open)
 
-- [x] `Scripts/build-app.sh` compiles AntiBleedAudio/AntiBleedApp (verified on GitHub macos-14 runner, 2026-09-07: APM + AECBridge + driver + app, 43 Swift + 84 Python tests green)
+- [x] `Scripts/build-app.sh` compiles AntiBleedAudio/AntiBleedApp (verified on GitHub macos-14 runner, 2026-09-07: APM + AECBridge + driver + app, 43 Swift + 84 Python tests green at that commit)
 - [ ] `sudo Scripts/install-driver.sh` -> `Anti-Bleed_mic` visible, writer hidden
 - [ ] System audio permission prompt appears on first start; denial keeps raw mic working
 - [ ] Tap exclusion: play a tone through the app itself, verify it is not in the render meter
 - [ ] Discord input = Anti-Bleed_mic, remote peer confirms bleed reduction
 - [ ] Kill the app mid-call -> Anti-Bleed_mic goes silent (driver underflow), no stale audio
+- [ ] D-020 continuity: with speakers as the macOS output, let the far end pause for
+      10-20 s mid-call. The badge must stay `Active` (no `Bypass` / `Learning` churn in
+      Diagnostics -> Recent transitions) and the peer must hear no skip when speech resumes.
+- [ ] D-020 alignment: Diagnostics shows a non-zero path alignment; force a transition
+      (mute/unmute the system output) and confirm the peer hears a smooth fade, not a click.
+- [ ] D-020 headphones: switch the macOS output to headphones mid-call -> the app pauses
+      ("Paused: output is not ...") and the raw mic keeps flowing; switch back to the
+      speakers -> it resumes on its own without user action.

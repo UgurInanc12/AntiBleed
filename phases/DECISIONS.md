@@ -135,3 +135,17 @@ Newest decision at the bottom. Never delete entries; supersede with a new one.
 - Status: ACCEPTED
 - Decision: Anti-Bleed_mic is released under Apache-2.0 (Copyright 2026 Ugur Inanc). Third-party notices in NOTICE. No GPL code is present (BlackHole was never used, D-010).
 - Consequence: `Scripts/package.sh` ships LICENSE, NOTICE and the WebRTC/abseil license texts inside the app bundle.
+
+## D-020: Continuous operation - far-end silence never switches the exposed signal
+
+- Status: ACCEPTED (refines D-012)
+- Context: The first Mac build showed the product behaving as `Bypass` while quiet, then `Learning`, then processing, and the audio audibly skipped on each pass. Two causes were measured with the real AEC3 (webrtc-audio-processing 2.1, `build/aec/Release/aec_offline.exe`):
+  1. The AEC output lags its own input by a constant 430 samples (8.96 ms at 48 kHz; identical with render silent, render active without coupling, and during double talk, and stable across a stream). The FSM exposed the undelayed raw mic in BYPASS and the AEC output in ACTIVE, so every transition spliced two instants ~9 ms apart, and the 100 ms crossfade mixed a signal with a time-shifted copy of itself.
+  2. `ACTIVE -> BYPASS on render inactive` fired on every conversational pause, although a silent far end leaves the AEC transparent: measured over an 8 s pause the AEC output matched the raw mic within 0.0 dB at 0.985 correlation. The rule protected nothing and generated the transitions.
+- Decision:
+  - The raw candidate is delayed to the canceller's own latency (`DelayLine`), measured at startup by `EchoCancellerLatency.measure` with a 100 ms internal noise burst against a silent render (0.1 s already resolves the lag exactly; the AEC is reset afterwards). Both FSM candidates therefore describe the same instant and a switch is a gain change, not a time jump.
+  - Far-end silence no longer leaves ACTIVE or LEARNING. Coupling is only re-judged while the far end actually plays; during silence the score decays for lack of evidence, not for lack of an echo path. ACTIVE has NO silence timeout (`activeSilenceGraceFrames = 0`): once processing is running it keeps running until a real hazard or the user stops it. LEARNING keeps a 5 s bound because it has not yet proven a coupling path.
+  - The hazards that BYPASS exists for are unchanged and still act during silence where they apply: coupling lost while the far end plays (headphones), filter divergence, and route change.
+  - At the app level the pipeline pauses while macOS is not playing through the selected reference output and resumes automatically when it is again (`AppState.pauseWhenOutputNotDefault`, on by default). This is the deliberate answer to the headphones case, where AEC3 attenuates the near-end voice by roughly 6 dB (`Tests/test_aec3_offline.py::test_case_h_...`): the app stops rather than degrading the user's voice.
+- Consequence: A pause produces zero state transitions and zero source switches (`Tests/test_pipeline_integration.py::test_scenario_6_...`). Alignment is verified in `test_scenario_7_...` (aligned correlation > 0.95 versus 0.55 unaligned) and in `PathAlignmentTests`. The virtual mic gains 9 ms of latency in BYPASS, which is the price of a seamless switch and stays well inside the PLAN 30 latency budget. Swift and Python FSM mirrors must stay in sync.
+

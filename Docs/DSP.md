@@ -30,10 +30,15 @@ Per aligned (render, mic) pair:
 
 1. render -> AEC reverse stream (always, keeps the filter warm in BYPASS, PLAN 12.3)
 2. mic -> AEC capture stream -> cleaned
-3. `RenderActivityDetector` (-55 dBFS threshold, 500 ms hangover)
-4. `CouplingDetector.push()` every frame, `evaluate()` every 100 ms
-5. `SafetyStateMachine.update()` -> rawMic / aecProcessed / crossfade(p) / silence
-6. output = mic, cleaned, equal-power mix of the two, or zeros. The render frame is structurally not a candidate (D-008).
+3. raw candidate = mic delayed by the AEC's own latency (D-020)
+4. `RenderActivityDetector` (-55 dBFS threshold, 500 ms hangover)
+5. `CouplingDetector.push()` every frame, `evaluate()` every 100 ms (fed the undelayed mic and render)
+6. `SafetyStateMachine.update()` -> rawMic / aecProcessed / crossfade(p) / silence
+7. output = aligned raw, cleaned, equal-power mix of the two, or zeros. The render frame is structurally not a candidate (D-008).
+
+## 3a. Path alignment (D-020)
+
+The APM's output lags its own input by a fixed amount (measured 430 samples / 8.96 ms at 48 kHz, constant across silence, active render and double talk). `EchoCancellerLatency.measure` finds it at startup with a 100 ms internal noise burst against a silent render and `DelayLine` delays the raw candidate to match, so a BYPASS <-> ACTIVE switch is a gain change instead of a ~9 ms jump in the timeline. Cost: 9 ms of extra latency while in BYPASS.
 
 ## 4. Coupling detector (D-018)
 
@@ -42,17 +47,27 @@ Per aligned (render, mic) pair:
 - score = (0.45 corr + 0.35 ERLE + 0.20 stability) * (0.5 + 0.5 health), smoothed 0.7/0.3
 - Silent render decays the score
 
-## 5. Safety FSM (D-012)
+## 5. Safety FSM (D-012, D-020)
 
 ```
 STOPPED/ERROR -> silence
 BYPASS   : raw. render active and AEC available -> PROBING
 PROBING  : raw. score > 0.6 and 3 stable windows -> LEARNING; render off -> BYPASS
 LEARNING : raw. score > 0.7, divergence < 0.1, > 300 ms -> ACTIVE (100 ms crossfade)
-ACTIVE   : aec. render off -> BYPASS; score < 0.35 or divergence > 0.2 -> DEGRADED (crossfade back)
+           silence tolerated for 5 s; score is only judged while render is active
+ACTIVE   : aec. held through far-end silence indefinitely (the AEC is transparent
+           with no render to cancel, so switching back would only be audible;
+           activeSilenceGraceFrames = 0 disables the timeout entirely)
+           render active and (score < 0.35 or divergence > 0.2) -> DEGRADED (crossfade back)
+           divergence > 0.2 -> DEGRADED even during silence
 DEGRADED : raw. score > 0.65 and divergence < 0.05 -> LEARNING; 500 ms timeout -> BYPASS
 any      : divergence > 0.3 while ACTIVE/LEARNING -> DEGRADED; route change -> BYPASS immediately
 ```
+
+Above the FSM, the app pauses the whole pipeline while macOS is not playing through
+the selected reference output and resumes when it is again (`AppState.pauseWhenOutputNotDefault`).
+That is the deliberate handling of the headphones case, where AEC3 attenuates the
+near-end voice by ~6 dB.
 
 ## 6. Real-time rules (PLAN 19)
 
