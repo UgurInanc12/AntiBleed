@@ -52,6 +52,9 @@ final class AppState: ObservableObject {
     private var timer: AnyCancellable?
     /// Autostart must fire exactly once per launch, not on every device change.
     private var hasAutoStarted = false
+    /// Tracks the writer so its appearance (driver installed while running) can
+    /// trigger exactly one restart (D-023).
+    private var hadWriter = false
 
     init() {
         isAECEnabled = UserDefaults.standard.object(forKey: "antibleed.aecEnabled") as? Bool ?? true
@@ -197,9 +200,10 @@ final class AppState: ObservableObject {
         Task { @MainActor in
             defer { isInstallingDriver = false }
             do {
-                try await Task.detached(priority: .userInitiated) {
-                    try DriverInstaller.install()
-                }.value
+                // Deliberately NOT on a background queue: NSAppleScript is
+                // documented main-thread-only. The authentication dialog runs its
+                // own modal loop, so the UI stays responsive anyway.
+                try DriverInstaller.install()
             } catch {
                 lastError = error.localizedDescription
                 driverStatus = DriverInstaller.status()
@@ -209,9 +213,10 @@ final class AppState: ObservableObject {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             deviceManager.refresh()
             driverStatus = DriverInstaller.status()
-            // Pick up the now-present writer: without a restart the pipeline keeps
-            // running with no destination for the cleaned audio.
-            if isRunning { restart() }
+            // refresh() publishes asynchronously, so the writer may not be visible
+            // yet on this pass; handleDevicesChanged() restarts the pipeline when
+            // it lands. Restart here only if it is already present.
+            if isRunning && deviceManager.virtualWriterPresent { restart() }
         }
     }
 
@@ -254,6 +259,17 @@ final class AppState: ObservableObject {
         // Fresh install: nothing persisted, so adopt whatever macOS is using.
         adoptSystemDefaultsIfNeeded()
         driverStatus = DriverInstaller.status()
+
+        // The driver just appeared (installed while we were running). The pipeline
+        // was started with no writer, so its cleaned audio goes nowhere until it
+        // is restarted (D-023).
+        let writerPresent = deviceManager.virtualWriterPresent
+        defer { hadWriter = writerPresent }
+        if writerPresent && !hadWriter && isRunning {
+            restart()
+            return  // start() already calls syncOutputRoutePause()
+        }
+
         // Autostart fires here rather than on a timer, because this is the first
         // point at which the device list (and therefore the defaults) is known.
         if autoStart && !isRunning && !hasAutoStarted && !selectedMicUID.isEmpty {

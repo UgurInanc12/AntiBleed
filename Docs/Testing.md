@@ -100,6 +100,16 @@ Acceptance: bleed reduced by >= 15 dB on speakers; headphones stay in BYPASS; do
       microphone". Click it -> macOS asks for the password ONCE -> within a few seconds
       `Anti-Bleed_mic` appears in System Settings -> Sound and in Discord's input list,
       with no terminal involved. Test this with the app in ~/Downloads too (TCC path).
+- [ ] D-023 install while running: with the app already processing, install the driver
+      from the button. The pipeline must restart by itself once the writer appears, and
+      cleaned audio must actually reach Discord (ask the peer). Before that restart the
+      app runs with nowhere to send audio, so a missing restart is a silent failure.
+- [ ] D-023 cancel: click Install, then press Cancel in the password dialog. The app must
+      report "Installation needs an administrator password. Nothing was changed." and keep
+      working, not hang and not re-prompt.
+- [ ] D-023 signing: the bundled driver is ad-hoc signed when DEVELOPER_ID is unset. If the
+      device never appears, check whether coreaudiod refused to load it:
+      log show --last 2m --predicate 'process == "coreaudiod"' | grep -i antibleed
 - [ ] D-021 first run: delete `~/Library/Preferences/com.antibleed.app.plist`, launch -> the
       pickers already show the system default mic/speakers and processing starts on its own,
       with no Start press. Reboot -> the app comes back by itself (login item).

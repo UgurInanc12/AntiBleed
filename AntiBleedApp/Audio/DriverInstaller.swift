@@ -57,8 +57,10 @@ public enum DriverInstaller {
 
     /// CFBundleVersion of a driver bundle, used to detect an outdated install.
     static func version(ofDriverAt path: String) -> String? {
-        let plist = (path as NSString).appendingPathComponent("Contents/Info.plist")
-        guard let dict = NSDictionary(contentsOfFile: plist) else { return nil }
+        let plist = URL(fileURLWithPath: path).appendingPathComponent("Contents/Info.plist")
+        guard let data = try? Data(contentsOf: plist),
+              let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return nil }
         return (dict["CFBundleVersion"] as? String) ?? (dict["CFBundleShortVersionString"] as? String)
     }
 
@@ -75,29 +77,38 @@ public enum DriverInstaller {
 
     /// Copies the bundled driver into place and restarts coreaudiod.
     ///
+    /// MUST be called on the main thread: `NSAppleScript` is documented by Apple
+    /// as "main thread only" (Thread Safety Summary, Foundation). Running it on a
+    /// background queue is the classic intermittent-crash recipe.
+    ///
     /// Staged through `/tmp` on purpose: with the app in `~/Desktop` or
     /// `~/Downloads`, a root shell is still blocked by TCC from reading the
     /// user's folder, so a direct `cp` fails with "Operation not permitted".
     /// `/tmp` is outside TCC, so the unprivileged copy happens first and only
     /// the final move needs root.
+    @MainActor
     public static func install() throws {
 #if canImport(AppKit)
         guard let source = bundledDriverPath else { throw InstallError.noBundledDriver }
 
-        let stage = NSTemporaryDirectory() + "AntiBleed_install_stage.driver"
+        let stage = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("AntiBleed_install_stage.driver")
         try? FileManager.default.removeItem(atPath: stage)
         try FileManager.default.copyItem(atPath: source, toPath: stage)
         defer { try? FileManager.default.removeItem(atPath: stage) }
 
         // One elevated shell: replace the bundle, fix ownership, restart the daemon.
-        let script = """
-        rm -rf '\(installedPath)' && \
-        mkdir -p '/Library/Audio/Plug-Ins/HAL' && \
-        cp -R '\(stage)' '\(installedPath)' && \
-        chown -R root:wheel '\(installedPath)' && \
-        chmod -R 755 '\(installedPath)' && \
-        (launchctl kickstart -k system/com.apple.audio.coreaudiod || killall coreaudiod)
-        """
+        // Single-quoted paths; the quoting helper rejects anything that could
+        // escape them.
+        let script = "rm -rf '\(installedPath)'"
+            + " && mkdir -p '/Library/Audio/Plug-Ins/HAL'"
+            + " && cp -R '\(stage)' '\(installedPath)'"
+            + " && chown -R root:wheel '\(installedPath)'"
+            + " && chmod -R 755 '\(installedPath)'"
+            + " && (launchctl kickstart -k system/com.apple.audio.coreaudiod || killall coreaudiod)"
+        guard !stage.contains("'"), !installedPath.contains("'") else {
+            throw InstallError.commandFailed("unsafe path")
+        }
         try runElevated(script)
 #else
         throw InstallError.noBundledDriver
@@ -107,9 +118,13 @@ public enum DriverInstaller {
 #if canImport(AppKit)
     /// Runs a shell command as root through the system authentication dialog.
     /// The password is typed into macOS's own panel; it never reaches this process.
+    @MainActor
     private static func runElevated(_ shellCommand: String) throws {
-        let quoted = shellCommand.replacingOccurrences(of: "\\", with: "\\\\")
-                                 .replacingOccurrences(of: "\"", with: "\\\"")
+        // The command is embedded in an AppleScript string literal, so backslashes
+        // and double quotes must be escaped for AppleScript, in that order.
+        let quoted = shellCommand
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
         let source = "do shell script \"\(quoted)\" with administrator privileges"
         var error: NSDictionary?
         guard let script = NSAppleScript(source: source) else {

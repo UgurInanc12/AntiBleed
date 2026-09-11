@@ -41,4 +41,6 @@ else
 fi
 
 echo "[package] ${APP} (v${VERSION}) ready."
-echo "[package] Install the driver from the bundle: sudo Scripts/install-driver.sh ${APP}/Contents/Library/Audio/Plug-Ins/HAL/AntiBleed.driver"
+echo "[package] Open the app and click 'Install virtual microphone' (D-023): it installs"
+echo "[package] the bundled driver itself and asks for the password once."
+echo "[package] Manual fallback: sudo Scripts/install-driver.sh ${APP}/Contents/Library/Audio/Plug-Ins/HAL/AntiBleed.driver"
