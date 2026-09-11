@@ -56,7 +56,7 @@ public enum DriverInstaller {
     }
 
     /// CFBundleVersion of a driver bundle, used to detect an outdated install.
-    static func version(ofDriverAt path: String) -> String? {
+    public static func version(ofDriverAt path: String) -> String? {
         let plist = URL(fileURLWithPath: path).appendingPathComponent("Contents/Info.plist")
         guard let data = try? Data(contentsOf: plist),
               let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
@@ -81,34 +81,38 @@ public enum DriverInstaller {
     /// as "main thread only" (Thread Safety Summary, Foundation). Running it on a
     /// background queue is the classic intermittent-crash recipe.
     ///
-    /// Staged through `/tmp` on purpose: with the app in `~/Desktop` or
-    /// `~/Downloads`, a root shell is still blocked by TCC from reading the
-    /// user's folder, so a direct `cp` fails with "Operation not permitted".
-    /// `/tmp` is outside TCC, so the unprivileged copy happens first and only
-    /// the final move needs root.
+    /// Copy to a unique user temporary path before elevation, avoiding a direct
+    /// privileged read from Desktop/Downloads. Root prepares the replacement
+    /// beside the destination; a copy failure never removes the installed driver.
     @MainActor
     public static func install() throws {
 #if canImport(AppKit)
         guard let source = bundledDriverPath else { throw InstallError.noBundledDriver }
 
         let stage = (NSTemporaryDirectory() as NSString)
-            .appendingPathComponent("AntiBleed_install_stage.driver")
-        try? FileManager.default.removeItem(atPath: stage)
+            .appendingPathComponent("AntiBleed-\(UUID().uuidString).driver")
         try FileManager.default.copyItem(atPath: source, toPath: stage)
         defer { try? FileManager.default.removeItem(atPath: stage) }
-
-        // One elevated shell: replace the bundle, fix ownership, restart the daemon.
-        // Single-quoted paths; the quoting helper rejects anything that could
-        // escape them.
-        let script = "rm -rf '\(installedPath)'"
-            + " && mkdir -p '/Library/Audio/Plug-Ins/HAL'"
-            + " && cp -R '\(stage)' '\(installedPath)'"
-            + " && chown -R root:wheel '\(installedPath)'"
-            + " && chmod -R 755 '\(installedPath)'"
-            + " && (launchctl kickstart -k system/com.apple.audio.coreaudiod || killall coreaudiod)"
         guard !stage.contains("'"), !installedPath.contains("'") else {
             throw InstallError.commandFailed("unsafe path")
         }
+
+        // Prepare and validate in a root-owned directory before replacing anything.
+        // The EXIT trap restores the previous bundle if the final move fails.
+        let script = """
+        set -eu
+        dst='\(installedPath)'
+        /bin/mkdir -p /Library/Audio/Plug-Ins/HAL
+        work=$(/usr/bin/mktemp -d /Library/Audio/Plug-Ins/HAL/.AntiBleed.XXXXXX)
+        trap 'if [ ! -e "$dst" ] && [ -d "$work/old" ]; then /bin/mv "$work/old" "$dst" || exit $?; fi; /bin/rm -rf "$work"' EXIT
+        /usr/bin/ditto '\(stage)' "$work/new"
+        /usr/bin/codesign --verify --strict "$work/new"
+        /usr/sbin/chown -R root:wheel "$work/new"
+        /bin/chmod -R 755 "$work/new"
+        if [ -e "$dst" ]; then /bin/mv "$dst" "$work/old"; fi
+        /bin/mv "$work/new" "$dst"
+        /bin/launchctl kickstart -k system/com.apple.audio.coreaudiod || /usr/bin/killall coreaudiod
+        """
         try runElevated(script)
 #else
         throw InstallError.noBundledDriver

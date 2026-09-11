@@ -61,7 +61,7 @@ Hard invariant: never `clean = mic - systemAudio`. The path `h(t)` includes DAC/
               Anti-Bleed_internal_writer  (hidden output, kAudioDevicePropertyIsHidden)
                              |
                              v
-                      driver shared ring buffer (bounded, lock-free SPSC)
+                      driver shared ring buffer (bounded, non-waiting atomic gate)
                              |
                              v
                      Anti-Bleed_mic  (visible input, selected in Discord/Zoom)
@@ -119,7 +119,7 @@ Core Audio callbacks (mic + tap)          DSP worker thread               Main t
 ─────────────────────────────            ──────────────────              ─────────────────
 Copy Float32 block                       Pull timestamp-aligned pairs    @Published state,
 attach AudioTimeStamp (host/sample/rate) assemble 480 frames            meters (30 Hz),
-push into lock-free SPSC ring            ProcessReverseStream/Stream     pickers, diagnostics
+push into non-waiting ring            ProcessReverseStream/Stream     pickers, diagnostics
 return immediately                       crossfade / gate output
                                          push to VirtualWriterRing
 No malloc, no blocking mutex, no I/O, no UI work, no JSON in any audio thread.

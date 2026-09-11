@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-/// Driver-side SPSC shared ring. Bounded, preallocated, real-time safe.
+/// Legacy ring-policy test implementation. HAL uses the shared C abm_fifo.
 /// Writer = Anti-Bleed_internal_writer (hidden output), Reader = Anti-Bleed_mic (visible input).
 /// Underflow -> silence, overrun -> drop oldest. No malloc in I/O procs.
 class SharedRingBuffer {
@@ -25,6 +25,7 @@ public:
     void reset();
 
 private:
+    std::atomic_flag access_ = ATOMIC_FLAG_INIT;
     size_t capacityFrames_;
     size_t frameSize_;
     std::vector<float> buffer_;

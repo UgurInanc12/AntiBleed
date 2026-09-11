@@ -30,6 +30,7 @@ public final class SafetyStateMachine {
     public private(set) var aecDelayMs: Int? = nil
     public private(set) var framesInState: Int = 0
     public private(set) var transitionCount: UInt64 = 0
+    public private(set) var lastTransitionReason = "initial"
 
     // Tuning (diagnostics-configurable, PLAN 13.5).
     public var learnEnterScore: Float = 0.6
@@ -72,7 +73,9 @@ public final class SafetyStateMachine {
     public var onTransition: ((PipelineState, PipelineState) -> Void)?
 
     private var ramp = CrossfadeRamp()
-    private var rampDirectionToProcessed = true
+    private var rampStart: Float = 0
+    private var rampTarget: Float = 0
+    private var processedMix: Float = 0
     /// Consecutive frames with a silent far end. Reset by any render activity.
     private var silentFrames = 0
     /// Consecutive frames of evidence against the current processed state
@@ -82,15 +85,16 @@ public final class SafetyStateMachine {
 
     public init() {}
 
-    public func start() { transition(to: .bypass); ramp.reset(); silentFrames = 0; contraryFrames = 0 }
-    public func stop() { transition(to: .stopped); ramp.reset(); silentFrames = 0; contraryFrames = 0 }
-    public func fail() { transition(to: .error); ramp.reset(); silentFrames = 0; contraryFrames = 0 }
+    public func start() { transition(to: .bypass, reason: "start"); ramp.reset(); processedMix = 0; silentFrames = 0; contraryFrames = 0 }
+    public func stop() { transition(to: .stopped, reason: "stop"); ramp.reset(); processedMix = 0; silentFrames = 0; contraryFrames = 0 }
+    public func fail() { transition(to: .error, reason: "failure"); ramp.reset(); processedMix = 0; silentFrames = 0; contraryFrames = 0 }
 
     public func reset() {
-        transition(to: .bypass)
+        transition(to: .bypass, reason: "reset")
         couplingConfidence = 0
         aecDelayMs = nil
         ramp.reset()
+        processedMix = 0
         silentFrames = 0
         contraryFrames = 0
     }
@@ -101,9 +105,11 @@ public final class SafetyStateMachine {
                        aecStats: AECStats,
                        aecAvailable: Bool = true,
                        routeChanged: Bool = false) -> OutputSelection {
+        if state == .stopped || state == .error { return .silence }
         if routeChanged {
-            transition(to: .bypass)
+            transition(to: .bypass, reason: "route_changed")
             ramp.reset()
+            processedMix = 0
             silentFrames = 0
             contraryFrames = 0
             return .rawMic
@@ -121,16 +127,16 @@ public final class SafetyStateMachine {
 
         // Hard fail-safe: diverging filter while processed audio is exposed.
         if aecStats.divergentFilterFraction > hardDivergence && (state == .active || state == .learning) {
-            transition(to: .degraded)
+            transition(to: .degraded, reason: "hard_divergence")
             beginRamp(toProcessed: false)
         }
 
         // The AEC became unavailable (user toggle off, no real engine, or the
         // reference output is no longer the one macOS plays through). Processed
         // audio must not stay exposed: crossfade back to the raw mic (D-020).
-        if !aecAvailable && (state == .active || state == .learning || state == .probing) {
-            let wasProcessed = state == .active
-            transition(to: .bypass)
+        if !aecAvailable && (state == .active || state == .learning || state == .probing || state == .degraded) {
+            let wasProcessed = processedMix > 0 || ramp.isActive
+            transition(to: .bypass, reason: "aec_unavailable")
             if wasProcessed { beginRamp(toProcessed: false) } else { ramp.reset() }
             framesInState += 1
             return wasProcessed ? rampedOutput(idle: .rawMic) : .rawMic
@@ -143,13 +149,13 @@ public final class SafetyStateMachine {
             return .silence
 
         case .bypass:
-            if renderActivity.isActive && aecAvailable { transition(to: .probing) }
+            if renderActivity.isActive && aecAvailable { transition(to: .probing, reason: "render_active") }
             return rampedOutput(idle: .rawMic)
 
         case .probing:
-            if !renderActivity.isActive { transition(to: .bypass); return .rawMic }
+            if !renderActivity.isActive { transition(to: .bypass, reason: "render_silent"); return .rawMic }
             if coupling.score > learnEnterScore && coupling.stableWindows >= learnEnterStableWindows {
-                transition(to: .learning)
+                transition(to: .learning, reason: "coupling_stable")
             }
             return .rawMic
 
@@ -157,13 +163,13 @@ public final class SafetyStateMachine {
             // A pause in the far end is not evidence against coupling; keep
             // learning through it (D-020) and only give up on a long silence.
             if silentFrames > learningSilenceGraceFrames {
-                transition(to: .bypass); return .rawMic
+                transition(to: .bypass, reason: "learning_silence_timeout"); return .rawMic
             }
             // Sustained contrary evidence, not a single bad frame (D-022).
             if renderActivity.isActive && coupling.score < learningAbortScore {
                 contraryFrames += 1
                 if contraryFrames > exitConfirmFrames {
-                    transition(to: .bypass); return .rawMic
+                    transition(to: .bypass, reason: "learning_coupling_lost"); return .rawMic
                 }
             } else {
                 contraryFrames = 0
@@ -171,7 +177,7 @@ public final class SafetyStateMachine {
             if coupling.score > activeEnterScore
                 && aecStats.divergentFilterFraction < 0.1
                 && framesInState > activeEnterMinFrames {
-                transition(to: .active)
+                transition(to: .active, reason: "aec_converged")
                 beginRamp(toProcessed: true)
                 return rampedOutput(idle: .aecProcessed)
             }
@@ -183,14 +189,14 @@ public final class SafetyStateMachine {
             // transition (D-020). With activeSilenceGraceFrames == 0 silence
             // alone never releases the state.
             if activeSilenceGraceFrames > 0 && silentFrames > activeSilenceGraceFrames {
-                transition(to: .bypass)
+                transition(to: .bypass, reason: "active_silence_timeout")
                 beginRamp(toProcessed: false)
                 return rampedOutput(idle: .rawMic)
             }
             // Divergence is a real fault: act on it immediately, at any moment.
             if aecStats.divergentFilterFraction > degradedDivergence {
                 contraryFrames = 0
-                transition(to: .degraded)
+                transition(to: .degraded, reason: "filter_divergence")
                 beginRamp(toProcessed: false)
                 return rampedOutput(idle: .rawMic)
             }
@@ -202,7 +208,7 @@ public final class SafetyStateMachine {
             if renderActivity.isActive && coupling.score < activeExitScore {
                 contraryFrames += 1
                 if contraryFrames > exitConfirmFrames && framesInState > activeMinDwellFrames {
-                    transition(to: .degraded)
+                    transition(to: .degraded, reason: "coupling_lost")
                     beginRamp(toProcessed: false)
                     return rampedOutput(idle: .rawMic)
                 }
@@ -212,9 +218,9 @@ public final class SafetyStateMachine {
             return rampedOutput(idle: .aecProcessed)
 
         case .degraded:
-            if framesInState > degradedTimeoutFrames { transition(to: .bypass); return .rawMic }
+            if framesInState > degradedTimeoutFrames { transition(to: .bypass, reason: "recovery_timeout"); return .rawMic }
             if coupling.score > degradedRecoverScore && aecStats.divergentFilterFraction < 0.05 {
-                transition(to: .learning)
+                transition(to: .learning, reason: "filter_recovered")
             }
             return rampedOutput(idle: .rawMic)
         }
@@ -223,27 +229,32 @@ public final class SafetyStateMachine {
 
     // MARK: - Internals
 
-    private func transition(to new: PipelineState) {
+    private func transition(to new: PipelineState, reason: String) {
         guard new != state else { return }
         let old = state
         state = new
+        lastTransitionReason = reason
         framesInState = 0
+        contraryFrames = 0
         transitionCount += 1
         onTransition?(old, new)
     }
 
     private func beginRamp(toProcessed: Bool) {
-        rampDirectionToProcessed = toProcessed
+        rampStart = processedMix
+        rampTarget = toProcessed ? 1 : 0
         ramp.start(frames: crossfadeFrames)
     }
 
     /// While a ramp is active, expose a crossfade whose progress moves toward the
     /// idle target (1 = processed, 0 = raw). Otherwise expose `idle`.
     private func rampedOutput(idle: OutputSelection) -> OutputSelection {
-        guard ramp.isActive else { return idle }
-        let p = ramp.progress
+        guard ramp.isActive else {
+            processedMix = idle == .aecProcessed ? 1 : 0
+            return idle
+        }
+        processedMix = rampStart + (rampTarget - rampStart) * ramp.progress
         ramp.advance()
-        let progress = rampDirectionToProcessed ? p : (1 - p)
-        return .crossfade(progress: progress)
+        return .crossfade(progress: processedMix)
     }
 }

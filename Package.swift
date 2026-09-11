@@ -75,7 +75,7 @@ targets.append(contentsOf: [
 
 let package = Package(
     name: "AntiBleed",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("14.2")],
     products: products,
     targets: targets
 )

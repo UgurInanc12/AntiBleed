@@ -52,6 +52,24 @@ struct DiagnosticsView: View {
                 row("System audio", appState.permissions.systemAudio.rawValue)
                 if let err = s.lastError { row("Last error", err) }
                 Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Diagnostic logging (no audio)", isOn: $appState.loggingEnabled)
+                        .onChange(of: appState.loggingEnabled) { _, enabled in appState.setDiagnosticLogging(enabled) }
+                    Text("Local only. Up to 20 files of 5 MiB; oldest files are removed.")
+                        .foregroundStyle(.secondary)
+                    row("Log records / dropped", "\(appState.logStatus.written) / \(appState.logStatus.dropped)")
+                    row("Old log files removed", "\(appState.logStatus.prunedFiles)")
+                    if let error = appState.logStatus.error { Text(error).foregroundStyle(.orange) }
+                    HStack {
+                        Button("Mark a problem") { appState.markDiagnosticProblem() }
+                            .disabled(!appState.loggingEnabled)
+                        Button(appState.isExportingLogs ? "Exporting..." : "Export diagnostic logs") {
+                            appState.exportDiagnosticLogs()
+                        }.disabled(appState.isExportingLogs)
+                    }
+                    if let notice = appState.logNotice { Text(notice).textSelection(.enabled) }
+                }
+                Divider()
                 Text("Recent transitions").font(.caption).foregroundStyle(.secondary)
                 ForEach(appState.recentTransitions.prefix(12), id: \.self) { Text($0) }
             }

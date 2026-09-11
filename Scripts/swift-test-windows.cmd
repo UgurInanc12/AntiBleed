@@ -11,4 +11,4 @@ REM version that ships stdnoreturn.h (referenced by Swift's ucrt.modulemap).
 if not defined VCINSTALLDIR call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat" 10.0.22621.0 >nul 2>&1
 cd /d "%~dp0.."
 swift test %*
-endlocal
+endlocal & exit /b %errorlevel%

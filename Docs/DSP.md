@@ -34,7 +34,7 @@ Per aligned (render, mic) pair:
 4. `RenderActivityDetector` (-55 dBFS threshold, 500 ms hangover)
 5. `CouplingDetector.push()` every frame, `evaluate()` every 100 ms (fed the undelayed mic and render)
 6. `SafetyStateMachine.update()` -> rawMic / aecProcessed / crossfade(p) / silence
-7. output = aligned raw, cleaned, equal-power mix of the two, or zeros. The render frame is structurally not a candidate (D-008).
+7. output = aligned raw, cleaned, linear mix of the two, or zeros. The render frame is structurally not a candidate (D-008).
 
 ## 3a. Path alignment (D-020)
 

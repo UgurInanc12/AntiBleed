@@ -45,6 +45,24 @@ enum Signals {
 }
 
 final class EngineTests: XCTestCase {
+    func testCrossfadeDoesNotAmplifyIdenticalAlignedCandidates() {
+        let aec = FakeCanceller(); aec.echoGain = 0
+        let engine = AntiBleedEngine(aec: aec); engine.start()
+        var largestError: Float = 0
+        var fades = 0
+        for i in 0..<200 {
+            let samples = Signals.noise(480, seed: UInt64(i) + 1)
+            let frame = Signals.frame(samples, seq: UInt64(i))
+            let out = engine.process(render: frame, mic: frame)
+            if engine.telemetry.output == "xfade" {
+                fades += 1
+                largestError = max(largestError, zip(out.samples, samples).map { abs($0 - $1) }.max() ?? 0)
+            }
+        }
+        XCTAssertGreaterThan(fades, 0)
+        XCTAssertLessThan(largestError, 0.00001, "Aligned copies must not get louder during a fade")
+    }
+
     /// Headphones / no coupling: render active but mic contains no echo -> FSM
     /// must stay out of ACTIVE and the output must be the raw microphone.
     func testNoCouplingKeepsRawMic() {

@@ -9,7 +9,7 @@
 | DSP + FSM mirrors, fixtures | pytest (`Tests/test_*.py`) | yes | yes | yes |
 | Real AEC3 offline cases A-J | pytest + `build/aec/aec_offline` | yes | yes | yes |
 | 5 live scenarios (AEC3 + detector + FSM) | `Tests/test_pipeline_integration.py` | yes | yes | yes |
-| Swift core (engine, FSM, detector, sync, rings) | `swift test` (59 XCTest) | yes (`Scripts/swift-test-windows.cmd`) | yes | yes |
+| Swift core (engine, FSM, detector, sync, rings) | `swift test` (79 XCTest) | yes (`Scripts/swift-test-windows.cmd`) | yes | yes |
 | AECBridge sanity | `ctest` in `build/aec` | yes | yes | yes |
 | Driver ring policy | `ctest` in `build/driver` | yes | yes | yes |
 | HAL driver install, tap permission, Discord | manual + `Scripts/install-driver.sh` | no | no | **required** |
@@ -22,16 +22,36 @@
 env -u PYTHONPATH uv venv .venv && env -u PYTHONPATH uv pip install -r Tests/requirements.txt
 cmake -S AECBridge -B build/aec -G "Visual Studio 16 2019" -A x64 && cmake --build build/aec --config Release
 cmake -S AntiBleedDriver -B build/driver -G "Visual Studio 16 2019" -A x64 && cmake --build build/driver --config Release
-.venv/Scripts/pytest -q                      # 96 tests
+.venv/Scripts/pytest -q                      # 113 tests
 build/aec/Release/AECBridgeTests.exe          # AEC3 sanity
 build/driver/Release/SharedRingBufferTests.exe
 
 # Swift core (Windows, winget Swift 6.3 + VS2019 Build Tools + Windows SDK 10.0.22621)
-Scripts/swift-test-windows.cmd                # 59 tests
+Scripts/swift-test-windows.cmd                # 79 tests
 
 # macOS: everything
 Scripts/bootstrap-macos.sh && Scripts/build-app.sh release
 ```
+
+## Diagnostic logging verification
+
+Current suites: 113 pytest and 79 Swift XCTest pass. Logging adds 11 executable Swift
+tests and 3 source-wiring checks. See `Docs/DiagnosticLogging.md` for the accelerated
+28,800-record soak, privacy/retention contract and open macOS export gate.
+
+## Current audit verification (2026-09-11, before logging)
+
+- Windows: 110 pytest tests, 68 Swift XCTest tests, 2 CTest executables pass.
+- The pytest total includes 10 source-wiring checks for macOS-only code and 4
+  isolated shell transaction tests. These are NOT Core Audio/UI runtime coverage.
+- All 24 application Swift files pass syntax parsing; the modified macOS targets
+  have NOT been compiled on a Mac in this audit. The earlier CI pass below is historical.
+- SwiftPM reports a Windows `.build/debug` symbolic-link warning; tests still run
+  from the architecture-specific build directory.
+- Ring tests now cover consumer-view lifetime and concurrent overflow ordering.
+  Non-waiting gates may drop audio on contention; hardware dropout/latency measurement
+  remains a release requirement, not something the unit suite establishes.
+- See `Docs/Audit-2026-09-11.md` for the changes, rejected review claims and open gates.
 
 ## 3. Measured results (2026-09-07, Windows, real WebRTC AEC3 v2.1)
 

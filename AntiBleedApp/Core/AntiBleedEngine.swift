@@ -175,7 +175,7 @@ public final class AntiBleedEngine {
         case .aecProcessed:
             outSamples = cleaned; outName = "aec"
         case .crossfade(let p):
-            outSamples = Crossfade.equalPower(alignedRaw, cleaned, progress: p); outName = "xfade"
+            outSamples = Crossfade.linear(alignedRaw, cleaned, progress: p); outName = "xfade"
         case .silence:
             outSamples = [Float](repeating: 0, count: mic.samples.count); outName = "silence"
         }

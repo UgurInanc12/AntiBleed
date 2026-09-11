@@ -35,7 +35,11 @@ final class AppState: ObservableObject {
     @Published var pipelineState: PipelineState = .stopped
     @Published var snapshot = AntiBleedPipeline.Snapshot()
     @Published var isRunning = false
-    @Published var lastError: String?
+    @Published var lastError: String? {
+        didSet {
+            if let lastError, lastError != oldValue { diagnosticLog.record("app_error", fields: ["message": lastError]) }
+        }
+    }
     @Published var recentTransitions: [String] = []
     /// True while processing is suspended because the selected reference output
     /// is not the current macOS output (D-020). The pipeline resumes by itself.
@@ -49,15 +53,30 @@ final class AppState: ObservableObject {
     let permissions = Permissions()
     let pipeline = AntiBleedPipeline()
 
+    @AppStorage("antibleed.loggingEnabled") var loggingEnabled = true
+    @Published var logStatus = DiagnosticLog.Status()
+    @Published var isExportingLogs = false
+    @Published var logNotice: String?
+    let diagnosticLog = DiagnosticLog(directory: FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/AntiBleed"),
+        enabled: UserDefaults.standard.object(forKey: "antibleed.loggingEnabled") as? Bool ?? true)
+    var diagnosticHealth = DiagnosticHealthWindow()
+    var lastHealthTime = ProcessInfo.processInfo.systemUptime
+    var lastDiagnosticContext: [String: String] = [:]
+    var diagnosticObservers: [AnyCancellable] = []
+
     private var timer: AnyCancellable?
     /// Autostart must fire exactly once per launch, not on every device change.
     private var hasAutoStarted = false
     /// Tracks the writer so its appearance (driver installed while running) can
     /// trigger exactly one restart (D-023).
     private var hadWriter = false
+    private var startTask: Task<Void, Never>?
+    private var resumeWhenDevicesReturn = false
 
     init() {
         isAECEnabled = UserDefaults.standard.object(forKey: "antibleed.aecEnabled") as? Bool ?? true
+        setupDiagnostics()
         deviceManager.onDevicesChanged = { [weak self] in self?.handleDevicesChanged() }
         deviceManager.observeDeviceChanges()
         deviceManager.refresh()
@@ -65,7 +84,7 @@ final class AppState: ObservableObject {
 
         pipeline.onStateChange = { [weak self] from, to in
             guard let self else { return }
-            self.pipelineState = to
+            if self.pipelineState != .error { self.pipelineState = to }
             let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
             self.recentTransitions.insert("\(stamp)  \(from.rawValue) -> \(to.rawValue)", at: 0)
             if self.recentTransitions.count > 50 { self.recentTransitions.removeLast() }
@@ -73,9 +92,12 @@ final class AppState: ObservableObject {
         pipeline.onError = { [weak self] msg in self?.lastError = msg }
 
         timer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect().sink { [weak self] _ in
-            guard let self, self.isRunning else { return }
-            self.snapshot = self.pipeline.currentSnapshot()
-            self.pipelineState = self.snapshot.engine.state
+            guard let self else { return }
+            if self.isRunning {
+                self.snapshot = self.pipeline.currentSnapshot()
+                self.pipelineState = self.snapshot.engine.state
+            }
+            self.observeDiagnostics()
         }
 
         // First launch: adopt the system defaults and register the login item so
@@ -107,7 +129,10 @@ final class AppState: ObservableObject {
     var driverInstalled: Bool { deviceManager.virtualMicPresent && deviceManager.virtualWriterPresent }
 
     var statusLine: String {
+        if isInstallingDriver { return "Installing virtual microphone" }
+        if pipelineState == .error { return "Error" }
         if !isRunning { return "Stopped" }
+        if snapshot.writerState != "running" { return "Diagnostics only: virtual microphone unavailable" }
         if isPausedForOutputRoute {
             let name = selectedOutput?.name ?? "the selected speakers"
             return "Raw microphone: output is not \(name)"
@@ -161,10 +186,15 @@ final class AppState: ObservableObject {
     }
 
     func start() {
+        guard !isInstallingDriver, startTask == nil else { return }
+        logEvent("start_requested")
         permissions.refreshMicStatus()
         if permissions.mic == .notDetermined {
-            Task { @MainActor in
+            startTask = Task { @MainActor in
                 let s = await permissions.requestMic()
+                diagnosticLog.record("microphone_permission", fields: ["result": s.rawValue])
+                guard !Task.isCancelled else { return }
+                startTask = nil
                 if s == .granted { self.start() } else { self.lastError = "Microphone permission denied." }
             }
             return
@@ -179,53 +209,86 @@ final class AppState: ObservableObject {
                                                aecEnabled: isAECEnabled)
             try pipeline.start(config: cfg)
             isRunning = true
-            lastError = pipeline.currentSnapshot().lastError
-            permissions.recordSystemAudioOutcome(granted: pipeline.capture.state == .running)
+            snapshot = pipeline.currentSnapshot()
+            pipelineState = snapshot.engine.state
+            lastError = snapshot.lastError
+            if !selectedOutputUID.isEmpty {
+                permissions.recordSystemAudioOutcome(granted: pipeline.capture.state == .running)
+            }
             // Starting while the system already plays through something else must
             // come up in raw-mic mode, not with the AEC engaged (D-020).
             syncOutputRoutePause()
+            logEvent("start_succeeded")
         } catch {
             isRunning = false
             lastError = error.localizedDescription
             pipelineState = .error
+            logEvent("start_failed")
         }
     }
 
     /// Installs the driver bundled in the app and restarts the pipeline once
     /// Core Audio has published the new devices (D-023).
     func installDriver() {
+        logEvent("install_requested")
         guard !isInstallingDriver else { return }
+        let shouldResume = isRunning || autoStart
+        guard stop() else { return }
         isInstallingDriver = true
         lastError = nil
         Task { @MainActor in
             defer { isInstallingDriver = false }
             do {
-                // Deliberately NOT on a background queue: NSAppleScript is
-                // documented main-thread-only. The authentication dialog runs its
-                // own modal loop, so the UI stays responsive anyway.
+                // NSAppleScript must stay on the main thread.
                 try DriverInstaller.install()
+                logEvent("install_copy_completed")
             } catch {
+                isInstallingDriver = false
+                if shouldResume { startIfPossible() }
                 lastError = error.localizedDescription
                 driverStatus = DriverInstaller.status()
+                logEvent("install_failed")
                 return
             }
-            // coreaudiod needs a moment to republish the device list.
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            deviceManager.refresh()
+            // Wait for HAL publication, rather than treating a successful copy as readiness.
+            for _ in 0..<20 {
+                deviceManager.refresh()
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                if driverInstalled && selectedMic != nil { break }
+            }
             driverStatus = DriverInstaller.status()
-            // refresh() publishes asynchronously, so the writer may not be visible
-            // yet on this pass; handleDevicesChanged() restarts the pipeline when
-            // it lands. Restart here only if it is already present.
-            if isRunning && deviceManager.virtualWriterPresent { restart() }
+            isInstallingDriver = false
+            guard driverInstalled else {
+                lastError = "Driver copied, but Core Audio has not published the virtual microphone. Restart macOS, then try again."
+                return
+            }
+            logEvent("install_devices_ready")
+            hadWriter = true
+            if shouldResume { startIfPossible() }
         }
     }
-
-    func stop() {
-        pipeline.stop()
+    @discardableResult
+    func stop() -> Bool {
+        observeDiagnostics()
+        if loggingEnabled { diagnosticLog.record("health_partial", fields: diagnosticHealth.finish()) }
+        logEvent("stop_requested")
+        startTask?.cancel()
+        startTask = nil
+        hasAutoStarted = true
+        resumeWhenDevicesReturn = false
+        guard pipeline.stop() else {
+            lastError = pipeline.currentSnapshot().lastError
+            pipelineState = .error
+            logEvent("stop_timeout")
+            return false
+        }
         isRunning = false
         pipelineState = .stopped
         // Nothing is running, so the route flag no longer describes anything.
         isPausedForOutputRoute = false
+        snapshot = pipeline.currentSnapshot()
+        logEvent("stop_completed")
+        return true
     }
 
     func selectMic(_ uid: String) {
@@ -239,43 +302,46 @@ final class AppState: ObservableObject {
     }
 
     private func restart() {
+        logEvent("restart_requested")
         // start() re-evaluates the route flag through syncOutputRoutePause().
-        stop()
+        guard stop() else { return }
         start()
     }
 
     private func handleDevicesChanged() {
-        // Selected device vanished (unplugged / Bluetooth off): fall back to defaults.
+        logEvent("devices_changed")
+        guard !isInstallingDriver else { return }
+        let previousMic = selectedMicUID
+        let previousOutput = selectedOutputUID
         if !selectedMicUID.isEmpty, selectedMic == nil {
-            lastError = "Microphone disconnected; switched to system default."
             selectedMicUID = deviceManager.defaultInputUID ?? ""
-            if isRunning { restart() }
         }
         if !selectedOutputUID.isEmpty, selectedOutput == nil {
-            lastError = "Output device disconnected; switched to system default."
             selectedOutputUID = deviceManager.defaultOutputUID ?? ""
-            if isRunning { restart() }
         }
-        // Fresh install: nothing persisted, so adopt whatever macOS is using.
         adoptSystemDefaultsIfNeeded()
         driverStatus = DriverInstaller.status()
-
-        // The driver just appeared (installed while we were running). The pipeline
-        // was started with no writer, so its cleaned audio goes nowhere until it
-        // is restarted (D-023).
+        let selectionChanged = previousMic != selectedMicUID || previousOutput != selectedOutputUID
         let writerPresent = deviceManager.virtualWriterPresent
-        defer { hadWriter = writerPresent }
-        if writerPresent && !hadWriter && isRunning {
-            restart()
-            return  // start() already calls syncOutputRoutePause()
-        }
+        let writerChanged = writerPresent != hadWriter
+        hadWriter = writerPresent
 
-        // Autostart fires here rather than on a timer, because this is the first
-        // point at which the device list (and therefore the defaults) is known.
-        if autoStart && !isRunning && !hasAutoStarted && !selectedMicUID.isEmpty {
+        if isRunning && selectedMicUID.isEmpty {
+            let stopped = stop()
+            resumeWhenDevicesReturn = stopped
+            lastError = "No microphone available. Waiting for a device."
+            return
+        }
+        if isRunning && (selectionChanged || writerChanged) {
+            restart()
+            return
+        }
+        if !isRunning && !selectedMicUID.isEmpty &&
+            (resumeWhenDevicesReturn || (autoStart && !hasAutoStarted)) {
+            resumeWhenDevicesReturn = false
             hasAutoStarted = true
             startIfPossible()
-            return  // start() already calls syncOutputRoutePause()
+            return
         }
         syncOutputRoutePause()
     }
@@ -295,7 +361,7 @@ final class AppState: ObservableObject {
     /// kill the mic in the middle of a call. Only the echo cancellation is
     /// suspended, because with no bleed to remove AEC3 would attenuate the
     /// near-end voice by roughly 6 dB.
-    private func syncOutputRoutePause() {
+    func syncOutputRoutePause() {
         guard isRunning else {
             if isPausedForOutputRoute { isPausedForOutputRoute = false }
             return
@@ -309,11 +375,9 @@ final class AppState: ObservableObject {
         pipeline.setReferenceOutputActive(onReference)
         if !onReference && !isPausedForOutputRoute {
             isPausedForOutputRoute = true
-            let name = selectedOutput?.name ?? "the selected speakers"
-            lastError = "Echo cancellation paused: system output is no longer \(name). Microphone still live."
+
         } else if onReference && isPausedForOutputRoute {
             isPausedForOutputRoute = false
-            lastError = nil
         }
     }
 }

@@ -41,7 +41,9 @@ class FSM:
         self.transitions = []
         self.ramp_total = 10
         self.ramp_pos = None
-        self.ramp_to_processed = True
+        self.ramp_start = 0.0
+        self.ramp_target = 0.0
+        self.processed_mix = 0.0
         self.silent_frames = 0
         # D-022: sustained contrary evidence, not a single frame.
         self.contrary_frames = 0
@@ -56,23 +58,28 @@ class FSM:
             self.transitions.append((self.state, s))
             self.state = s
             self.frames = 0
+            self.contrary_frames = 0
 
     def _ramp(self, to_processed):
-        self.ramp_to_processed = to_processed
+        self.ramp_start = self.processed_mix
+        self.ramp_target = 1.0 if to_processed else 0.0
         self.ramp_pos = 0
 
     def _out(self, idle):
         if self.ramp_pos is None:
+            self.processed_mix = 1.0 if idle == "aec" else 0.0
             return idle
         p = self.ramp_pos / self.ramp_total
         self.ramp_pos += 1
         if self.ramp_pos >= self.ramp_total:
             self.ramp_pos = None
-        return ("xfade", p if self.ramp_to_processed else 1 - p)
+        self.processed_mix = self.ramp_start + (self.ramp_target - self.ramp_start) * p
+        return ("xfade", self.processed_mix)
 
     def update(self, render_active, score, stable, div, aec_available=True, route_changed=False):
         if route_changed:
             self._go("bypass"); self.ramp_pos = None
+            self.processed_mix = 0.0
             self.silent_frames = 0
             self.contrary_frames = 0
             return "raw"
@@ -80,8 +87,8 @@ class FSM:
         if div > 0.3 and self.state in ("active", "learning"):
             self._go("degraded"); self._ramp(False)
         # D-020: no usable AEC -> raw mic, never silence.
-        if not aec_available and self.state in ("active", "learning", "probing"):
-            was_processed = self.state == "active"
+        if not aec_available and self.state in ("active", "learning", "probing", "degraded"):
+            was_processed = self.processed_mix > 0 or self.ramp_pos is not None
             self._go("bypass")
             if was_processed:
                 self._ramp(False)
@@ -148,8 +155,8 @@ class RenderActivity:
         return False
 
 
-def equal_power(a, b, p):
-    return math.cos(p * math.pi / 2) * a + math.sin(p * math.pi / 2) * b
+def linear_fade(a, b, p):
+    return (1 - p) * a + p * b
 
 
 def run_pipeline(render, mic, aec_stats_stream=None, route_change_at=None, align=True):
@@ -192,7 +199,7 @@ def run_pipeline(render, mic, aec_stats_stream=None, route_change_at=None, align
         elif sel == "aec":
             out[i * FRAME:(i + 1) * FRAME] = c
         else:
-            out[i * FRAME:(i + 1) * FRAME] = equal_power(a, c, sel[1])
+            out[i * FRAME:(i + 1) * FRAME] = linear_fade(a, c, sel[1])
         states.append(fsm.state); outputs.append(sel if isinstance(sel, str) else "xfade")
     return out, cleaned, states, outputs, fsm, stats
 
@@ -303,9 +310,8 @@ def test_invariant_output_is_always_convex_mix_of_mic_and_cleaned():
     n = len(states) * FRAME
     lo = np.minimum(mic[:n], cleaned[:n]) - 1e-6
     hi = np.maximum(mic[:n], cleaned[:n]) + 1e-6
-    # equal-power crossfade can exceed the linear hull by at most sqrt(2) in magnitude;
-    # bound with that factor.
-    assert np.all(np.abs(out[:n]) <= np.maximum(np.abs(lo), np.abs(hi)) * math.sqrt(2) + 1e-6)
+    assert np.all(out[:n] >= lo)
+    assert np.all(out[:n] <= hi)
 
 
 # --------------------------------------------------- D-020: continuous operation

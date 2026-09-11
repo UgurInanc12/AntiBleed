@@ -74,24 +74,45 @@ static void testSPSCConcurrent() {
     const int N = 200000;
     std::atomic<bool> done{false};
     std::thread producer([&] {
-        for (int i = 0; i < N; ++i) { float v = float(i); while (r.freeFrames() == 0) {} r.push(&v, 1); }
+        for (int i = 0; i < N; ++i) { float v = float(i); while (r.freeFrames() == 0) {} while (r.push(&v, 1) != 0) {} }
         done = true;
     });
     float last = -1; long long popped = 0; bool monotonic = true;
     while (!done || r.availableFrames() > 0) {
         float v;
         if (r.availableFrames() == 0) continue;
-        r.pop(&v, 1); ++popped;
+        if (!r.pop(&v, 1)) continue;
+        ++popped;
         if (v <= last) monotonic = false;
         last = v;
     }
     producer.join();
     CHECK(popped == N);
     CHECK(monotonic);
-    CHECK(r.overruns() == 0);
+}
+
+static void testConcurrentOverflow() {
+    SharedRingBuffer r(64, 1);
+    std::atomic<bool> done{false};
+    std::thread producer([&] {
+        for (int i = 1; i <= 200000; ++i) { float value = float(i); r.push(&value, 1); }
+        done = true;
+    });
+    bool ordered = true;
+    float last = 0;
+    while (!done || r.availableFrames() > 0) {
+        float value = 0;
+        if (r.pop(&value, 1)) {
+            if (value <= last) ordered = false;
+            last = value;
+        }
+    }
+    producer.join();
+    CHECK(ordered);
 }
 
 int main() {
+    testConcurrentOverflow();
     testBasicRoundTrip();
     testUnderflowSilence();
     testOverflowDropsOldest();

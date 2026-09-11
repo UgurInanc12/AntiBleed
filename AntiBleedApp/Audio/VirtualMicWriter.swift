@@ -47,6 +47,9 @@ public final class VirtualMicWriter {
 
     /// Locates the hidden writer by UID and verifies it really is hidden + output-only.
     public func resolve() throws {
+        stop()
+        lastError = nil
+        deviceID = AudioObjectID(kAudioObjectUnknown)
         guard let id = CoreAudioProperty.deviceID(forUID: Self.writerUID) else {
             state = .unresolved
             lastError = "AntiBleed.driver not installed (writer UID \(Self.writerUID) not found)"

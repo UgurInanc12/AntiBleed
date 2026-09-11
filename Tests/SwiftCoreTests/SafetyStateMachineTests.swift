@@ -6,6 +6,52 @@ final class SafetyStateMachineTests: XCTestCase {
         AECStats(delayMs: delay, delayStddevMs: 1, divergentFilterFraction: div, valid: true)
     }
 
+    func testDisablingDuringFadeDoesNotJumpToFullyProcessedAudio() {
+        let sm = SafetyStateMachine(); sm.start()
+        let activity = RenderActivity(isActive: true)
+        let coupled = CouplingResult(score: 0.9, stableWindows: 8)
+        while sm.state != .active {
+            _ = sm.update(renderActivity: activity, coupling: coupled, aecStats: stats())
+        }
+        // The first activation frame is still entirely raw.
+        XCTAssertEqual(sm.update(renderActivity: activity, coupling: coupled,
+                                 aecStats: stats(), aecAvailable: false), .crossfade(progress: 0))
+    }
+
+    func testDivergenceWhileLearningNeverExposesProcessedAudio() {
+        let sm = SafetyStateMachine(); sm.start()
+        for _ in 0..<3 {
+            _ = sm.update(renderActivity: RenderActivity(isActive: true),
+                          coupling: CouplingResult(score: 0.9, stableWindows: 8), aecStats: stats())
+        }
+        XCTAssertEqual(sm.state, .learning)
+        let out = sm.update(renderActivity: RenderActivity(isActive: true),
+                            coupling: CouplingResult(score: 0.9), aecStats: stats(div: 0.5))
+        XCTAssertEqual(out, .crossfade(progress: 0), "Learning was raw; a faulty AEC must not become audible")
+    }
+
+    func testRouteNotificationCannotRestartStoppedEngine() {
+        let sm = SafetyStateMachine()
+        XCTAssertEqual(sm.update(renderActivity: RenderActivity(isActive: true),
+                                 coupling: CouplingResult(score: 1), aecStats: stats(),
+                                 routeChanged: true), .silence)
+        XCTAssertEqual(sm.state, .stopped)
+    }
+
+    func testUnavailableAECDoesNotRecoverFromDegradedToLearning() {
+        let sm = SafetyStateMachine(); sm.start()
+        for _ in 0..<80 {
+            _ = sm.update(renderActivity: RenderActivity(isActive: true),
+                          coupling: CouplingResult(score: 0.9, stableWindows: 8), aecStats: stats())
+        }
+        _ = sm.update(renderActivity: RenderActivity(isActive: true),
+                      coupling: CouplingResult(score: 0.9), aecStats: stats(div: 0.5))
+        XCTAssertEqual(sm.state, .degraded)
+        _ = sm.update(renderActivity: RenderActivity(isActive: true),
+                      coupling: CouplingResult(score: 0.9), aecStats: stats(), aecAvailable: false)
+        XCTAssertEqual(sm.state, .bypass)
+    }
+
     func testStoppedIsSilence() {
         let sm = SafetyStateMachine()
         XCTAssertEqual(sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 1, stableWindows: 9), aecStats: stats()), .silence)

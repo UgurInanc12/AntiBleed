@@ -37,8 +37,11 @@ class SafetyStateMachine:
         self.state = "bypass"
         self.frames_in_state = 0
         self.silent_frames = 0
+        self.contrary_frames = 0
 
     def update(self, render_activity, coupling, aec_stats, route_changed=False, aec_available=True):
+        if self.state in ("stopped", "error"):
+            return "silence"
         if route_changed:
             self.state = "bypass"
             self.frames_in_state = 0
@@ -55,7 +58,7 @@ class SafetyStateMachine:
             self.frames_in_state = 0
         # D-020: no usable AEC (toggle off, or the reference output is not the
         # macOS output) -> raw mic, never silence.
-        if not aec_available and self.state in ("active", "learning", "probing"):
+        if not aec_available and self.state in ("active", "learning", "probing", "degraded"):
             was_processed = self.state == "active"
             self.state = "bypass"
             self.frames_in_state = 0

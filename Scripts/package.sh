@@ -17,6 +17,10 @@ rm -rf "${APP}"
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources" "${APP}/Contents/Library/Audio/Plug-Ins/HAL"
 cp "${BIN}" "${APP}/Contents/MacOS/AntiBleed"
 cp AntiBleedApp/App/Info.plist "${APP}/Contents/Info.plist"
+REVISION="$(git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)"
+if [ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]; then REVISION="${REVISION}-dirty"; fi
+/usr/libexec/PlistBuddy -c "Add :AntiBleedBuildRevision string ${REVISION}" "${APP}/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :AntiBleedBuildTime string $(date -u +%Y-%m-%dT%H:%M:%SZ)" "${APP}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Add :CFBundleExecutable string AntiBleed' "${APP}/Contents/Info.plist" 2>/dev/null || true
 cp -R "${DRIVER}" "${APP}/Contents/Library/Audio/Plug-Ins/HAL/"
 mkdir -p "${APP}/Contents/Resources/licenses"
@@ -33,6 +37,8 @@ if [ -n "${DEVELOPER_ID:-}" ]; then
     ditto -c -k --keepParent "${APP}" "build/AntiBleed-${VERSION}.zip"
     xcrun notarytool submit "build/AntiBleed-${VERSION}.zip" --keychain-profile "${NOTARY_PROFILE}" --wait
     xcrun stapler staple "${APP}"
+    xcrun stapler validate "${APP}"
+    ditto -c -k --keepParent "${APP}" "build/AntiBleed-${VERSION}.zip"
   fi
 else
   echo "[package] DEVELOPER_ID not set: unsigned build (ad-hoc signing for local runs)"

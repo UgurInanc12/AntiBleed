@@ -13,7 +13,7 @@ No BlackHole (GPL) code is used (D-010).
 ```text
 Anti-Bleed app -> Anti-Bleed_internal_writer [hidden, output, UID com.antibleed.writer]
                       |
-               driver ring (500 ms, lock-free, C11 atomics)
+               driver ring (500 ms, non-waiting atomic gate)
                       |
                Anti-Bleed_mic [visible, input, UID com.antibleed.mic] -> Discord
 ```
@@ -24,7 +24,9 @@ Writer: `kAudioDevicePropertyIsHidden = 1`, `CanBeDefaultDevice = 0`. Mic: `CanB
 
 ## 3. IO
 
-- Writer `WriteMix` -> `ring_push`. Mic `ReadInput` -> `ring_pop`; underflow fills zeros and counts.
+- Writer `WriteMix` -> `abm_fifo_push`. Mic `ReadInput` -> `abm_fifo_pop`; underflow fills zeros and counts.
+- The driver and app use the same tested C FIFO. Overflow drops oldest audio; concurrent access rejects incoming writes or returns silence on reads, never waits or spins. Both are counted.
+- This is bounded non-waiting access, not a lossless lock-free queue. Measure contention and audible gaps on the Mac before release.
 - If the writer has no running IO (app quit or crashed) the mic reads pure silence: no stale audio.
 - Zero timestamp: software clock, 4800-frame period, seed bumps on each StartIO from idle.
 - Custom read-only property `'abrs'` on the mic device: a CFString `"underruns,overruns"` for Diagnostics.

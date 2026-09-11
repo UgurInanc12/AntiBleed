@@ -6,7 +6,8 @@ set(CMAKE_CXX_STANDARD 17)
 
 if(APPLE)
     # AntiBleed.driver bundle -> /Library/Audio/Plug-Ins/HAL/ (Scripts/install-driver.sh)
-    add_library(AntiBleed MODULE Driver/AntiBleedDriver.c)
+    add_library(AntiBleed MODULE Driver/AntiBleedDriver.c ../AntiBleedApp/Realtime/abm_ring.c)
+    target_include_directories(AntiBleed PRIVATE ../AntiBleedApp/Realtime/include)
     set_target_properties(AntiBleed PROPERTIES
         BUNDLE TRUE
         BUNDLE_EXTENSION "driver"

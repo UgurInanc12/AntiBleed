@@ -65,6 +65,7 @@ public final class AggregateCapture {
     public func create(micDeviceUID: String, outputDeviceUID: String?) throws {
         destroy()
         state = .creating
+        lastError = nil
         self.micDeviceUID = micDeviceUID
 
         guard let micID = CoreAudioProperty.deviceID(forUID: micDeviceUID) else {
@@ -206,13 +207,19 @@ public final class AggregateCapture {
                           input: UnsafePointer<AudioBufferList>,
                           inputTime: UnsafePointer<AudioTimeStamp>) {
         let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
-        guard let first = abl.first, first.mDataByteSize > 0 else { return }
+        guard let first = abl.first, first.mNumberChannels > 0, first.mDataByteSize > 0 else { return }
         // The aggregate vends interleaved or per-channel buffers depending on the
         // device. Handle both: compute channel c, frame i.
         let totalChannels = abl.reduce(0) { $0 + Int($1.mNumberChannels) }
         guard totalChannels >= micChannels + tapChannels, micChannels > 0 else { return }
         let frames = Int(first.mDataByteSize) / (Int(first.mNumberChannels) * MemoryLayout<Float>.size)
         guard frames > 0, frames <= maxFrames else { return }
+
+        for buf in abl {
+            let ch = Int(buf.mNumberChannels)
+            guard ch > 0, buf.mData != nil,
+                  Int(buf.mDataByteSize) >= frames * ch * MemoryLayout<Float>.size else { return }
+        }
 
         // Downmix mic channels -> mono, tap channels -> mono.
         for i in 0..<frames { micMono[i] = 0; renderMono[i] = 0 }

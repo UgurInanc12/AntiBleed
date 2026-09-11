@@ -6,6 +6,7 @@
 // zero timestamp domain) so that the HAL keeps their sample timelines aligned.
 
 #include "AntiBleedDriver.h"
+#include "abm_ring.h"
 
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -17,17 +18,7 @@
 
 // -------------------------------------------------------------------- state
 
-typedef struct {
-    float* buf;
-    uint32_t capacity;              // frames
-    _Atomic uint32_t write_pos;
-    _Atomic uint32_t read_pos;
-    _Atomic uint32_t size;
-    _Atomic uint64_t underruns;
-    _Atomic uint64_t overruns;
-} ring_t;
-
-static ring_t gRing;
+static abm_fifo_t* gRing;
 static pthread_mutex_t gStateMutex = PTHREAD_MUTEX_INITIALIZER;
 static AudioServerPlugInHostRef gHost = NULL;
 static ULONG gRefCount = 0;
@@ -49,57 +40,7 @@ static AudioServerPlugInDriverInterface gDriverInterface;
 static AudioServerPlugInDriverInterface* gDriverInterfacePtr = &gDriverInterface;
 static AudioServerPlugInDriverRef gDriverRef = &gDriverInterfacePtr;
 
-// -------------------------------------------------------------------- ring
 
-static void ring_init(ring_t* r, uint32_t capacity) {
-    r->buf = (float*)calloc(capacity, sizeof(float));
-    r->capacity = capacity;
-    atomic_store(&r->write_pos, 0);
-    atomic_store(&r->read_pos, 0);
-    atomic_store(&r->size, 0);
-    atomic_store(&r->underruns, 0);
-    atomic_store(&r->overruns, 0);
-}
-
-static void ring_reset(ring_t* r) {
-    atomic_store(&r->write_pos, 0);
-    atomic_store(&r->read_pos, 0);
-    atomic_store(&r->size, 0);
-    if (r->buf) memset(r->buf, 0, r->capacity * sizeof(float));
-}
-
-static void ring_push(ring_t* r, const float* data, uint32_t count) {
-    if (count > r->capacity) { data += count - r->capacity; count = r->capacity; }
-    uint32_t size = atomic_load_explicit(&r->size, memory_order_acquire);
-    if (size + count > r->capacity) {
-        uint32_t excess = size + count - r->capacity;
-        uint32_t rp = atomic_load_explicit(&r->read_pos, memory_order_relaxed);
-        atomic_store_explicit(&r->read_pos, (rp + excess) % r->capacity, memory_order_release);
-        atomic_fetch_sub_explicit(&r->size, excess, memory_order_acq_rel);
-        atomic_fetch_add_explicit(&r->overruns, excess, memory_order_relaxed);
-    }
-    uint32_t wp = atomic_load_explicit(&r->write_pos, memory_order_relaxed);
-    uint32_t first = r->capacity - wp; if (first > count) first = count;
-    memcpy(r->buf + wp, data, first * sizeof(float));
-    if (count > first) memcpy(r->buf, data + first, (count - first) * sizeof(float));
-    atomic_store_explicit(&r->write_pos, (wp + count) % r->capacity, memory_order_relaxed);
-    atomic_fetch_add_explicit(&r->size, count, memory_order_release);
-}
-
-static void ring_pop(ring_t* r, float* out, uint32_t count) {
-    uint32_t size = atomic_load_explicit(&r->size, memory_order_acquire);
-    uint32_t avail = size < count ? size : count;
-    uint32_t rp = atomic_load_explicit(&r->read_pos, memory_order_relaxed);
-    uint32_t first = r->capacity - rp; if (first > avail) first = avail;
-    memcpy(out, r->buf + rp, first * sizeof(float));
-    if (avail > first) memcpy(out + first, r->buf, (avail - first) * sizeof(float));
-    if (avail < count) {
-        memset(out + avail, 0, (count - avail) * sizeof(float)); // silence, never replay
-        atomic_fetch_add_explicit(&r->underruns, count - avail, memory_order_relaxed);
-    }
-    atomic_store_explicit(&r->read_pos, (rp + avail) % r->capacity, memory_order_release);
-    atomic_fetch_sub_explicit(&r->size, avail, memory_order_acq_rel);
-}
 
 // -------------------------------------------------------------------- helpers
 
@@ -166,7 +107,8 @@ static OSStatus AB_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPl
     struct mach_timebase_info tb; mach_timebase_info(&tb);
     Float64 hostClockFrequency = 1e9 * (Float64)tb.denom / (Float64)tb.numer;
     gHostTicksPerFrame = hostClockFrequency / kAntiBleed_SampleRate;
-    ring_init(&gRing, kAntiBleed_RingFrames);
+    gRing = abm_fifo_create(kAntiBleed_RingFrames);
+    if (!gRing) return kAudioHardwareUnspecifiedError;
     memset(&gMicIO, 0, sizeof gMicIO);
     memset(&gWriterIO, 0, sizeof gWriterIO);
     return 0;
@@ -387,8 +329,8 @@ static OSStatus AB_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObj
         case kAntiBleed_PropertyRingStats: {
             // Custom properties may only be CFString or CFPropertyList. Format: "underruns,overruns".
             if (inDataSize < sizeof(CFStringRef)) return kAudioHardwareBadPropertySizeError;
-            unsigned long long u = (unsigned long long)atomic_load(&gRing.underruns);
-            unsigned long long o = (unsigned long long)atomic_load(&gRing.overruns);
+            unsigned long long u = (unsigned long long)abm_fifo_underruns(gRing);
+            unsigned long long o = (unsigned long long)abm_fifo_overruns(gRing);
             *((CFStringRef*)outData) = CFStringCreateWithFormat(NULL, NULL, CFSTR("%llu,%llu"), u, o);
             *outDataSize = sizeof(CFStringRef); return 0;
         }
@@ -464,7 +406,11 @@ static OSStatus AB_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID id
         io->sampleTime = 0;
         io->hostTime = mach_absolute_time();
         io->seed++;
-        if (id == kObjectID_WriterDevice) ring_reset(&gRing);
+        // A mic callback may still be reading during a writer restart.
+        if (id == kObjectID_WriterDevice && !abm_fifo_try_reset(gRing)) {
+            pthread_mutex_unlock(&gStateMutex);
+            return kAudioHardwareUnspecifiedError;
+        }
     }
     atomic_fetch_add(&io->ioRunning, 1);
     pthread_mutex_unlock(&gStateMutex);
@@ -528,13 +474,13 @@ static OSStatus AB_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjec
     (void)inDriver; (void)clientID; (void)info; (void)secondaryBuf;
     if (!isDevice(id) || !isStream(streamID) || !mainBuf) return kAudioHardwareBadObjectError;
     if (id == kObjectID_WriterDevice && op == kAudioServerPlugInIOOperationWriteMix) {
-        ring_push(&gRing, (const float*)mainBuf, frames * kAntiBleed_Channels);
+        abm_fifo_push(gRing, (const float*)mainBuf, frames * kAntiBleed_Channels);
         return 0;
     }
     if (id == kObjectID_MicDevice && op == kAudioServerPlugInIOOperationReadInput) {
         Boolean writerLive = atomic_load_explicit(&gWriterIO.ioRunning, memory_order_acquire) > 0;
         if (writerLive) {
-            ring_pop(&gRing, (float*)mainBuf, frames * kAntiBleed_Channels);
+            abm_fifo_pop(gRing, (float*)mainBuf, frames * kAntiBleed_Channels);
         } else {
             // App not running: the virtual mic is silent (PLAN 15.3), never stale audio.
             memset(mainBuf, 0, frames * kAntiBleed_Channels * sizeof(float));

@@ -10,8 +10,8 @@ import AntiBleedRealtime
 ///   DSP thread: FrameAssembler(mic), FrameAssembler(render) -> AudioSynchronizer
 ///               -> AntiBleedEngine (AEC3 + coupling + safety FSM) -> VirtualMicWriter
 ///
-/// All heavy work happens on one high-priority worker thread that wakes on a
-/// semaphore signalled by the IOProc. Telemetry is copied for the UI at 20 Hz.
+/// Heavy work runs on one high-priority worker polling the ring every 2 ms.
+/// Telemetry is copied for the UI at 20 Hz; callbacks never take engine locks.
 @available(macOS 14.2, *)
 public final class AntiBleedPipeline {
     public struct Config: Equatable {
@@ -37,20 +37,27 @@ public final class AntiBleedPipeline {
         public init() {}
     }
 
-    public let engine: AntiBleedEngine
+    private let engine: AntiBleedEngine
     public private(set) var capture = AggregateCapture()
     public private(set) var writer = VirtualMicWriter()
     public private(set) var config: Config?
-    public private(set) var snapshot = Snapshot()
+    private var snapshot = Snapshot()
 
     /// Called on the main queue on every FSM transition (for logging / UI).
     public var onStateChange: ((PipelineState, PipelineState) -> Void)?
     public var onError: ((String) -> Void)?
+    public var onDiagnosticTransition: (([String: String]) -> Void)?
 
     private let micAssembler = FrameAssembler()
     private let renderAssembler = FrameAssembler()
     private var worker: Thread?
-    private var running = false
+    private let runLock = NSLock()
+    private let engineLock = NSLock()
+    private var runRequested = false
+    private var running: Bool {
+        get { runLock.lock(); defer { runLock.unlock() }; return runRequested }
+        set { runLock.lock(); defer { runLock.unlock() }; runRequested = newValue }
+    }
     private let wake = DispatchSemaphore(value: 0)
     private let workerDone = DispatchGroup()
     private let snapshotLock = NSLock()
@@ -66,7 +73,23 @@ public final class AntiBleedPipeline {
         }
         snapshot.engineName = engineName
         engine.fsm.onTransition = { [weak self] from, to in
-            DispatchQueue.main.async { self?.onStateChange?(from, to) }
+            guard let self else { return }
+            // Capture the decision metadata now, not from a later UI snapshot.
+            let aecStats = engine.aec.stats()
+            let fields = ["from": from.rawValue, "to": to.rawValue,
+                          "decision_uptime_seconds": String(ProcessInfo.processInfo.systemUptime),
+                          "divergence": String(aecStats.divergentFilterFraction),
+                          "erle_db": String(aecStats.echoReturnLossEnhancement),
+                          "aec_stats_valid": String(aecStats.valid),
+                          "reason": engine.fsm.lastTransitionReason,
+                          "coupling": String(engine.fsm.couplingConfidence),
+                          "aec_delay_ms": engine.fsm.aecDelayMs.map(String.init) ?? "unknown",
+                          "aec_enabled": String(engine.aecEnabled),
+                          "reference_active": String(engine.referenceOutputActive)]
+            DispatchQueue.main.async { [weak self] in
+                self?.onStateChange?(from, to)
+                self?.onDiagnosticTransition?(fields)
+            }
         }
     }
 
@@ -74,8 +97,17 @@ public final class AntiBleedPipeline {
 
     public func start(config: Config) throws {
         stop()
+        guard worker == nil else {
+            throw NSError(domain: "AntiBleedPipeline", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Previous audio worker is still stopping. Retry Start."])
+        }
+        snapshotLock.lock(); snapshot.lastError = nil; snapshotLock.unlock()
         self.config = config
         engine.aecEnabled = config.aecEnabled
+        // A failure after creating capture or starting the worker must unwind
+        // the partially started pipeline before the caller can retry.
+        var started = false
+        defer { if !started { stop() } }
 
         do {
             try writer.resolve()
@@ -90,7 +122,10 @@ public final class AntiBleedPipeline {
         engine.notifyRouteChanged()
         engine.start()
 
+        if writer.isResolved { try writer.start() }
+        try capture.start()
         running = true
+        publish()
         workerDone.enter()
         let t = Thread { [weak self] in
             defer { self?.workerDone.leave() }
@@ -101,25 +136,27 @@ public final class AntiBleedPipeline {
         t.threadPriority = 0.9
         worker = t
         t.start()
-
-        if writer.isResolved { try? writer.start() }
-        try capture.start()
-        publish()
+        started = true
     }
 
-    public func stop() {
-        guard running || capture.state != .idle else { return }
+    @discardableResult
+    public func stop() -> Bool {
+        guard worker != nil || running || capture.state != .idle else { return true }
         running = false
         wake.signal()
-        // The ring is single-consumer: wait for the old DSP thread before a restart
-        // could spawn a new one (bounded wait; the loop polls every 2 ms).
-        if worker != nil { _ = workerDone.wait(timeout: .now() + .milliseconds(500)) }
+        // Never destroy resources still owned by a live worker, or allow a
+        // replacement consumer to start on the same ring after a timeout.
+        if worker != nil && workerDone.wait(timeout: .now() + .milliseconds(500)) == .timedOut {
+            report("Audio worker did not stop in time. Resources retained; retry Stop before Start.")
+            return false
+        }
         capture.stop()
         capture.destroy()
         writer.stop()
         engine.stop()
         worker = nil
         publish()
+        return true
     }
 
     public var isRunning: Bool { running }
@@ -127,16 +164,17 @@ public final class AntiBleedPipeline {
     /// Re-route without tearing the UI down (device switch, PLAN 13.7).
     public func reconfigure(_ newConfig: Config) throws {
         guard let current = config else { try start(config: newConfig); return }
-        if current.micDeviceUID != newConfig.micDeviceUID || current.outputDeviceUID != newConfig.outputDeviceUID {
+        if !isRunning || current.micDeviceUID != newConfig.micDeviceUID || current.outputDeviceUID != newConfig.outputDeviceUID {
             try start(config: newConfig)
         } else {
             config = newConfig
-            engine.aecEnabled = newConfig.aecEnabled
+            setAECEnabled(newConfig.aecEnabled)
         }
     }
 
     public func setAECEnabled(_ enabled: Bool) {
         config?.aecEnabled = enabled
+        engineLock.lock(); defer { engineLock.unlock() }
         engine.aecEnabled = enabled
     }
 
@@ -145,6 +183,7 @@ public final class AntiBleedPipeline {
     /// virtual mic) instead of stopping the pipeline, so the microphone never
     /// dies mid-call when the user switches to headphones (D-020).
     public func setReferenceOutputActive(_ active: Bool) {
+        engineLock.lock(); defer { engineLock.unlock() }
         engine.referenceOutputActive = active
     }
 
@@ -160,7 +199,9 @@ public final class AntiBleedPipeline {
         var lastPublish = Date()
         while running {
             var didWork = false
-            while abm_ring_pop(capture.ring, &view) {
+            while running && abm_ring_pop(capture.ring, &view) {
+                engineLock.lock()
+                defer { engineLock.unlock() }
                 didWork = true
                 let n = Int(view.frames)
                 let micBlock = Array(UnsafeBufferPointer(start: view.mic, count: n))
@@ -188,6 +229,7 @@ public final class AntiBleedPipeline {
     }
 
     private func publish() {
+        engineLock.lock(); defer { engineLock.unlock() }
         snapshotLock.lock()
         snapshot.engine = engine.telemetry
         snapshot.captureState = capture.state.rawValue
