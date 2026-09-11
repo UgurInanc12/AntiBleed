@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import AntiBleedCore
 
 @available(macOS 14.2, *)
@@ -56,8 +57,13 @@ struct MenuBarView: View {
                     if appState.isRunning { appState.stop() } else { appState.startIfPossible() }
                 }
                 Spacer()
-                Button("Diagnostics") { openWindow(id: "diagnostics") }
-                SettingsLink { Text("Settings") }
+                // One window with Diagnostics + Settings tabs. The old SettingsLink
+                // was dead: it cannot open the Settings scene from a MenuBarExtra
+                // in an LSUIElement app.
+                Button("Diagnostics") {
+                    openWindow(id: "diagnostics")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
             }
 
             Divider()

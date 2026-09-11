@@ -130,6 +130,15 @@ Newest decision at the bottom. Never delete entries; supersede with a new one.
 - Decision: The detector keeps a 650 ms history decimated 8x (6 kHz), correlates a 400 ms window over 0 to 250 ms of lag (1 ms steps), narrows to +-15 ms around the AEC3 delay estimate once available, and weights correlation 0.45, ERLE 0.35, lag stability 0.20, multiplied by AEC health. Evaluated every 100 ms.
 - Consequence: Measured 0.94 correlation at the true 45 ms lag with score 1.0 on the coupled case and score 0.0 on the headphones case, using the real AEC3 output statistics. Swift and Python mirrors must stay in sync (`AntiBleedApp/Core/CouplingDetector.swift`, `Tests/dsp/coupling_detector.py`).
 
+## D-021: Zero-configuration startup and a single app window
+
+- Status: ACCEPTED
+- Decision: The app configures and starts itself. On first launch it adopts the current system default input/output as its selections and registers the login item (`SMAppService.mainApp.register()`), so a user who downloads, opens and forgets about it is protected after every reboot with no button pressed. Autostart is triggered by the first device enumeration rather than a fixed delay, because `DeviceManager.refresh()` publishes asynchronously and a timer can fire before the defaults are known. `hasAutoStarted` keeps it to once per launch. Empty selections are re-resolved to the system defaults whenever devices change, so a fresh install or a vanished device never leaves the app unusable.
+- Decision: The `Settings` scene is removed. `SettingsLink` (and `openSettings()`) cannot open it from a `MenuBarExtra` in an `LSUIElement` app, so the Settings button in the menu bar did nothing when clicked. Diagnostics and Settings are now tabs of one `Window(id: "diagnostics")`, opened with `openWindow(id:)` plus `NSApp.activate`, which does work from the menu bar.
+- Rationale: The menu bar popover is the product surface; every control in it must do something visible. A button that silently fails is worse than no button.
+- Consequences: `Launch at login` is on by default from first run but stays a user-visible toggle in Settings. `Start`/`Stop` stays in the menu bar as the manual override.
+- Verification: 58 Swift + 93 Python tests green. The re-engage measurement (`testReturningToSpeakersReEngagesQuickly`) reports cold start 111 frames vs 33 frames after returning from headphones (10 ms per frame), i.e. ~330 ms to resume bleed removal. UI behaviour itself is NOT verified: it cannot be compiled or run on Windows and needs the macOS checklist.
+
 ## D-019: License
 
 - Status: ACCEPTED

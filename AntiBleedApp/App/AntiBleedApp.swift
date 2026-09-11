@@ -14,15 +14,14 @@ struct AntiBleedApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Settings {
-            SettingsView()
+        // No `Settings` scene: SettingsLink silently does nothing from a
+        // MenuBarExtra in an LSUIElement app, which is why the old Settings
+        // button appeared dead. Settings live in this window as a tab instead,
+        // opened through openWindow(id:) which works from the menu bar.
+        Window("Anti-Bleed", id: "diagnostics") {
+            MainWindowView()
                 .environmentObject(appState)
         }
-
-        Window("Anti-Bleed Diagnostics", id: "diagnostics") {
-            DiagnosticsView()
-                .environmentObject(appState)
-        }
-        .defaultSize(width: 460, height: 520)
+        .defaultSize(width: 470, height: 560)
     }
 }

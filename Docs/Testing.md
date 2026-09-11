@@ -9,7 +9,7 @@
 | DSP + FSM mirrors, fixtures | pytest (`Tests/test_*.py`) | yes | yes | yes |
 | Real AEC3 offline cases A-J | pytest + `build/aec/aec_offline` | yes | yes | yes |
 | 5 live scenarios (AEC3 + detector + FSM) | `Tests/test_pipeline_integration.py` | yes | yes | yes |
-| Swift core (engine, FSM, detector, sync, rings) | `swift test` (57 XCTest) | yes (`Scripts/swift-test-windows.cmd`) | yes | yes |
+| Swift core (engine, FSM, detector, sync, rings) | `swift test` (58 XCTest) | yes (`Scripts/swift-test-windows.cmd`) | yes | yes |
 | AECBridge sanity | `ctest` in `build/aec` | yes | yes | yes |
 | Driver ring policy | `ctest` in `build/driver` | yes | yes | yes |
 | HAL driver install, tap permission, Discord | manual + `Scripts/install-driver.sh` | no | no | **required** |
@@ -27,7 +27,7 @@ build/aec/Release/AECBridgeTests.exe          # AEC3 sanity
 build/driver/Release/SharedRingBufferTests.exe
 
 # Swift core (Windows, winget Swift 6.3 + VS2019 Build Tools + Windows SDK 10.0.22621)
-Scripts/swift-test-windows.cmd                # 57 tests
+Scripts/swift-test-windows.cmd                # 58 tests
 
 # macOS: everything
 Scripts/bootstrap-macos.sh && Scripts/build-app.sh release
@@ -89,3 +89,10 @@ Acceptance: bleed reduced by >= 15 dB on speakers; headphones stay in BYPASS; do
       to `Bypass` with "Raw microphone: output is not ...", and the peer KEEPS HEARING YOU
       (the mic must not go silent); switch back to the speakers -> bleed removal re-engages
       on its own without user action.
+- [ ] D-021 first run: delete `~/Library/Preferences/com.antibleed.app.plist`, launch -> the
+      pickers already show the system default mic/speakers and processing starts on its own,
+      with no Start press. Reboot -> the app comes back by itself (login item).
+- [ ] D-021 window: the menu bar has no dead buttons. `Diagnostics` opens a window that has
+      both a Diagnostics and a Settings tab and comes to the front.
+- [ ] D-021 re-engage: measured 330 ms in the engine test; confirm by ear that returning from
+      headphones to speakers removes bleed again within roughly half a second.

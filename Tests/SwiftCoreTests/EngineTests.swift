@@ -226,6 +226,46 @@ final class EngineTests: XCTestCase {
         }
         XCTAssertEqual(engine.state, .active)
     }
+
+    /// Measures how long the round trip speakers -> headphones -> speakers takes,
+    /// so "it starts working again immediately" is a number and not a hope.
+    /// The coupling detector needs a few stable windows of evidence before the
+    /// FSM may re-arm, which is a real acoustic requirement, not a timer.
+    func testReturningToSpeakersReEngagesQuickly() {
+        let aec = FakeCanceller()
+        let engine = AntiBleedEngine(aec: aec)
+        engine.start()
+        var seq: UInt64 = 0
+        func run(_ frames: Int, coupled: Bool) -> Int {
+            var framesUntilActive = -1
+            for i in 0..<frames {
+                let r = Signals.noise(480, seed: UInt64(i) + 1)
+                let mic = coupled ? r.map { 0.5 * $0 } : Signals.noise(480, seed: UInt64(i) + 50_000)
+                _ = engine.process(render: Signals.frame(r, seq: seq), mic: Signals.frame(mic, seq: seq))
+                seq += 1
+                if engine.state == .active && framesUntilActive < 0 { framesUntilActive = i + 1 }
+            }
+            return framesUntilActive
+        }
+
+        let coldStart = run(400, coupled: true)
+        XCTAssertGreaterThan(coldStart, 0)
+        XCTAssertEqual(engine.state, .active)
+
+        // Headphones for 3 seconds.
+        engine.referenceOutputActive = false
+        _ = run(300, coupled: true)
+        XCTAssertEqual(engine.state, .bypass)
+
+        // Back to the speakers.
+        engine.referenceOutputActive = true
+        let reEngage = run(400, coupled: true)
+        XCTAssertGreaterThan(reEngage, 0, "must return to ACTIVE after the speakers come back")
+        XCTAssertEqual(engine.state, .active)
+        // Never slower than the very first climb: the AEC kept adapting while bypassed.
+        XCTAssertLessThanOrEqual(reEngage, coldStart)
+        print("re-engage frames: cold=\(coldStart) afterHeadphones=\(reEngage) (10 ms each)")
+    }
 }
 
 /// Canceller whose output lags its input by a fixed number of samples, like the

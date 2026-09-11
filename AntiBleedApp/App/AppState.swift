@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import ServiceManagement
 import AntiBleedCore
 import AntiBleedAudio
 
@@ -11,6 +12,9 @@ final class AppState: ObservableObject {
     // Persisted selections (UIDs are stable across reboots, IDs are not).
     @AppStorage("antibleed.micUID") var selectedMicUID: String = ""
     @AppStorage("antibleed.outputUID") var selectedOutputUID: String = ""
+    /// Start processing as soon as the device list is known. Default on: the
+    /// product is a background utility, the user should not have to press Start
+    /// after every login (D-021).
     @AppStorage("antibleed.autoStart") var autoStart: Bool = true
     /// Echo cancellation only makes sense while macOS actually plays through the
     /// selected reference output (D-020). When the user switches the system
@@ -42,6 +46,8 @@ final class AppState: ObservableObject {
     let pipeline = AntiBleedPipeline()
 
     private var timer: AnyCancellable?
+    /// Autostart must fire exactly once per launch, not on every device change.
+    private var hasAutoStarted = false
 
     init() {
         isAECEnabled = UserDefaults.standard.object(forKey: "antibleed.aecEnabled") as? Bool ?? true
@@ -65,8 +71,25 @@ final class AppState: ObservableObject {
             self.pipelineState = self.snapshot.engine.state
         }
 
-        if autoStart {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.startIfPossible() }
+        // First launch: adopt the system defaults and register the login item so
+        // the app is running after the next reboot with no user action. Both are
+        // one-time and remain user-overridable (Settings -> Launch at login).
+        if !UserDefaults.standard.bool(forKey: Self.didFirstRunKey) {
+            UserDefaults.standard.set(true, forKey: Self.didFirstRunKey)
+            enableLaunchAtLoginOnFirstRun()
+        }
+        // Autostart is driven by the first device enumeration, not a fixed delay:
+        // refresh() publishes asynchronously, so a timer could fire before the
+        // defaults are known and start with no microphone (D-021).
+    }
+
+    private static let didFirstRunKey = "antibleed.didFirstRun"
+
+    private func enableLaunchAtLoginOnFirstRun() {
+        guard SMAppService.mainApp.status != .enabled else { return }
+        do { try SMAppService.mainApp.register() } catch {
+            // Not fatal: the app still runs, it just will not come back after a reboot.
+            lastError = "Could not enable launch at login: \(error.localizedDescription)"
         }
     }
 
@@ -95,9 +118,26 @@ final class AppState: ObservableObject {
 
     // MARK: - Actions
 
+    /// Resolves empty selections to the current system defaults. Runs on first
+    /// launch (nothing persisted yet) and again whenever a stored device is gone,
+    /// so a fresh install is usable without opening any picker.
+    /// Returns true when something changed.
+    @discardableResult
+    func adoptSystemDefaultsIfNeeded() -> Bool {
+        var changed = false
+        if selectedMicUID.isEmpty, let def = deviceManager.defaultInputUID, !def.isEmpty {
+            selectedMicUID = def
+            changed = true
+        }
+        if selectedOutputUID.isEmpty, let def = deviceManager.defaultOutputUID, !def.isEmpty {
+            selectedOutputUID = def
+            changed = true
+        }
+        return changed
+    }
+
     func startIfPossible() {
-        if selectedMicUID.isEmpty { selectedMicUID = deviceManager.defaultInputUID ?? "" }
-        if selectedOutputUID.isEmpty { selectedOutputUID = deviceManager.defaultOutputUID ?? "" }
+        adoptSystemDefaultsIfNeeded()
         guard !selectedMicUID.isEmpty else { lastError = "Select a microphone first."; return }
         start()
     }
@@ -168,6 +208,15 @@ final class AppState: ObservableObject {
             lastError = "Output device disconnected; switched to system default."
             selectedOutputUID = deviceManager.defaultOutputUID ?? ""
             if isRunning { restart() }
+        }
+        // Fresh install: nothing persisted, so adopt whatever macOS is using.
+        adoptSystemDefaultsIfNeeded()
+        // Autostart fires here rather than on a timer, because this is the first
+        // point at which the device list (and therefore the defaults) is known.
+        if autoStart && !isRunning && !hasAutoStarted && !selectedMicUID.isEmpty {
+            hasAutoStarted = true
+            startIfPossible()
+            return  // start() already calls syncOutputRoutePause()
         }
         syncOutputRoutePause()
     }
