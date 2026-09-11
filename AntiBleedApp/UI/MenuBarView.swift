@@ -20,10 +20,8 @@ struct MenuBarView: View {
                 Text(err).font(.caption).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if !appState.driverInstalled {
-                Text("Virtual microphone driver not installed. Run Scripts/install-driver.sh.")
-                    .font(.caption).foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+            if !appState.driverInstalled || appState.driverStatus == .outdated {
+                driverBanner
             }
 
             Divider()
@@ -76,6 +74,44 @@ struct MenuBarView: View {
 
 @available(macOS 14.2, *)
 extension MenuBarView {
+    /// One-click driver install (D-023). The old banner told the user to run a
+    /// shell script, which is not something a menu-bar app may ask for.
+    @ViewBuilder
+    private var driverBanner: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            switch appState.driverStatus {
+            case .noBundledDriver:
+                Text("Virtual microphone driver not installed, and this build has no bundled copy. Run Scripts/package.sh to produce AntiBleed.app.")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .outdated:
+                Text("The installed driver is older than this app. Update it so the virtual microphone matches.")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                installButton(title: "Update driver")
+            default:
+                Text("One step left: install the virtual microphone so apps like Discord can select Anti-Bleed_mic.")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                installButton(title: "Install virtual microphone")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func installButton(title: String) -> some View {
+        HStack(spacing: 8) {
+            Button(title) { appState.installDriver() }
+                .disabled(appState.isInstallingDriver)
+            if appState.isInstallingDriver {
+                ProgressView().controlSize(.small)
+                Text("Installing...").font(.caption2).foregroundStyle(.secondary)
+            } else {
+                Text("Asks for your password").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var statsRow: some View {
         let engine = appState.snapshot.engine
         let coupling = String(format: "%.0f%% coupling", Double(engine.couplingScore) * 100)

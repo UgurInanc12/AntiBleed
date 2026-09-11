@@ -25,6 +25,10 @@ class SafetyStateMachine:
         self.frames_in_state = 0
         self.coupling_confidence = 0.0
         self.silent_frames = 0
+        # D-022: sustained contrary evidence, not a single frame.
+        self.contrary_frames = 0
+        self.exit_confirm_frames = 200
+        self.active_min_dwell_frames = 100
         # D-020: far-end silence never releases ACTIVE (0 = no timeout).
         self.active_silence_grace_frames = 0
         self.learning_silence_grace_frames = 500
@@ -39,6 +43,7 @@ class SafetyStateMachine:
             self.state = "bypass"
             self.frames_in_state = 0
             self.silent_frames = 0
+            self.contrary_frames = 0
             return "rawMic"
         self.coupling_confidence = coupling.score
         if render_activity.is_active:
@@ -79,9 +84,14 @@ class SafetyStateMachine:
             if self.silent_frames > self.learning_silence_grace_frames:
                 self.state = "bypass"
                 return "rawMic"
+            # D-022: sustained contrary evidence, not a single frame.
             if render_activity.is_active and coupling.score < 0.3:
-                self.state = "bypass"
-                return "rawMic"
+                self.contrary_frames += 1
+                if self.contrary_frames > self.exit_confirm_frames:
+                    self.state = "bypass"
+                    return "rawMic"
+            else:
+                self.contrary_frames = 0
             if coupling.score > 0.7 and aec_stats.divergentFilterFraction < 0.1 and self.frames_in_state > 30:
                 self.state = "active"
                 self.frames_in_state = 0
@@ -91,14 +101,22 @@ class SafetyStateMachine:
             if self.active_silence_grace_frames > 0 and self.silent_frames > self.active_silence_grace_frames:
                 self.state = "bypass"
                 return "crossfade"
-            if render_activity.is_active and (coupling.score < 0.35 or aec_stats.divergentFilterFraction > 0.2):
+            # Divergence is a real fault: immediate, at any moment.
+            if aec_stats.divergentFilterFraction > 0.2:
+                self.contrary_frames = 0
                 self.state = "degraded"
                 self.frames_in_state = 0
                 return "crossfade"
-            if not render_activity.is_active and aec_stats.divergentFilterFraction > 0.2:
-                self.state = "degraded"
-                self.frames_in_state = 0
-                return "crossfade"
+            # A coupling dip must persist (D-022).
+            if render_activity.is_active and coupling.score < 0.35:
+                self.contrary_frames += 1
+                if (self.contrary_frames > self.exit_confirm_frames
+                        and self.frames_in_state > self.active_min_dwell_frames):
+                    self.state = "degraded"
+                    self.frames_in_state = 0
+                    return "crossfade"
+            else:
+                self.contrary_frames = 0
             return "aecProcessed"
         elif self.state == "degraded":
             if self.frames_in_state > 50:
@@ -198,11 +216,37 @@ def test_active_silence_timeout_is_opt_in():
 
 
 def test_active_leaves_when_coupling_lost_while_far_end_plays():
-    """The real hazard Bypass exists for: headphones plugged in mid-call."""
+    """The real hazard Bypass exists for: headphones plugged in mid-call.
+
+    D-022: the loss must be sustained. A single bad frame no longer ejects
+    ACTIVE, because near the threshold the score swings frame to frame and
+    single-frame judgement made the state oscillate audibly.
+    """
     sm = SafetyStateMachine()
     sm.state = "active"
+    sm.frames_in_state = sm.active_min_dwell_frames + 1
+
+    # One bad frame is not enough.
     sm.update(RenderActivity(True), CouplingResult(score=0.05), AECStats())
+    assert sm.state == "active"
+
+    # Sustained loss is.
+    for _ in range(sm.exit_confirm_frames + 1):
+        sm.update(RenderActivity(True), CouplingResult(score=0.05), AECStats())
     assert sm.state == "degraded"
+
+
+def test_brief_coupling_dip_does_not_leave_active():
+    """D-022: the flapping the user reported. A dip shorter than the confirm
+    window must not cost a transition."""
+    sm = SafetyStateMachine()
+    sm.state = "active"
+    sm.frames_in_state = sm.active_min_dwell_frames + 1
+    for _ in range(30):  # 20 dips of 10 frames, always interrupted by good evidence
+        for _ in range(10):
+            sm.update(RenderActivity(True), CouplingResult(score=0.05), AECStats())
+        sm.update(RenderActivity(True), CouplingResult(score=0.9), AECStats())
+    assert sm.state == "active"
 
 
 def test_divergence_during_silence_still_leaves_active():

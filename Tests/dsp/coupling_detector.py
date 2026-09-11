@@ -116,7 +116,12 @@ class CouplingDetector:
         erle_score = float(np.clip((erle - self.erle_start_db) / (self.erle_full_db - self.erle_start_db), 0, 1))
         corr_score = float(np.clip((abs(best) - 0.2) / 0.5, 0, 1))
         stability = float(np.clip(self.stable_windows / self.min_stable_windows, 0, 1))
-        raw = (corr_score * 0.45 + erle_score * 0.35 + stability * 0.20) * (0.5 + 0.5 * aec_health)
+        # D-022: ERLE confirms correlation, it cannot replace it. AEC3 freezes its
+        # last ERLE when the echo path disappears (measured 37.2 dB held for 6+ s
+        # after the echo was gone), which alone pinned the score at activeExit.
+        erle_gate = float(np.clip((abs(best) - self.correlation_threshold * 0.5)
+                                  / (self.correlation_threshold * 0.5), 0, 1))
+        raw = (corr_score * 0.45 + erle_score * erle_gate * 0.35 + stability * 0.20) * (0.5 + 0.5 * aec_health)
         self.smoothed_score = 0.7 * self.smoothed_score + 0.3 * raw
         delay_ms = d_ms if (valid and d_ms >= 0) else peak_lag_ms
         out = self._result(best, delay_ms)

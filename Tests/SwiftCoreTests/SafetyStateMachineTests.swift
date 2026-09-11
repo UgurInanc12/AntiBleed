@@ -53,12 +53,44 @@ final class SafetyStateMachineTests: XCTestCase {
 
     /// The hazard that Bypass really exists for still works: far end playing
     /// while coupling collapses (user plugged in headphones) leaves ACTIVE.
+    ///
+    /// D-022: the loss must be SUSTAINED. Near the thresholds the coupling score
+    /// swings frame to frame, and judging a single frame made the state cycle
+    /// probing -> learning -> active continuously (measured 18 state changes in
+    /// 20 s of marginal coupling). Confirmation costs latency, not safety.
     func testActiveLeavesWhenCouplingLostWhileFarEndPlays() {
         let sm = SafetyStateMachine(); sm.start()
-        for _ in 0..<80 { _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats()) }
+        for _ in 0..<200 { _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats()) }
         XCTAssertEqual(sm.state, .active)
+
+        // One bad frame is not evidence.
         _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.05, stableWindows: 0), aecStats: stats())
+        XCTAssertEqual(sm.state, .active)
+
+        // A sustained loss is.
+        for _ in 0..<(sm.exitConfirmFrames + 1) {
+            _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.05, stableWindows: 0), aecStats: stats())
+        }
         XCTAssertEqual(sm.state, .degraded)
+    }
+
+    /// The flapping the user reported: dips shorter than the confirm window must
+    /// not cost a transition.
+    func testBriefCouplingDipsDoNotLeaveActive() {
+        let sm = SafetyStateMachine(); sm.start()
+        for _ in 0..<200 { _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.85, stableWindows: 8), aecStats: stats()) }
+        XCTAssertEqual(sm.state, .active)
+        let before = sm.transitionCount
+
+        for _ in 0..<40 {
+            // A dip of half the confirm window, always interrupted by good evidence.
+            for _ in 0..<(sm.exitConfirmFrames / 2) {
+                _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.05, stableWindows: 0), aecStats: stats())
+            }
+            _ = sm.update(renderActivity: RenderActivity(isActive: true), coupling: CouplingResult(score: 0.9, stableWindows: 8), aecStats: stats())
+        }
+        XCTAssertEqual(sm.state, .active)
+        XCTAssertEqual(sm.transitionCount, before, "no transition may be spent on brief dips")
     }
 
     /// Divergence must still fail safe even while the far end is silent.

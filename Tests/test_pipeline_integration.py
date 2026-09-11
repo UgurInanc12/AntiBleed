@@ -43,6 +43,10 @@ class FSM:
         self.ramp_pos = None
         self.ramp_to_processed = True
         self.silent_frames = 0
+        # D-022: sustained contrary evidence, not a single frame.
+        self.contrary_frames = 0
+        self.exit_confirm_frames = 200
+        self.active_min_dwell_frames = 100
         # D-020: far-end silence never releases ACTIVE (0 = no timeout).
         self.active_silence_grace = 0
         self.learning_silence_grace = 500
@@ -70,6 +74,7 @@ class FSM:
         if route_changed:
             self._go("bypass"); self.ramp_pos = None
             self.silent_frames = 0
+            self.contrary_frames = 0
             return "raw"
         self.silent_frames = 0 if render_active else self.silent_frames + 1
         if div > 0.3 and self.state in ("active", "learning"):
@@ -99,7 +104,11 @@ class FSM:
             if self.silent_frames > self.learning_silence_grace:
                 self._go("bypass"); return "raw"
             if render_active and score < 0.3:
-                self._go("bypass"); return "raw"
+                self.contrary_frames += 1
+                if self.contrary_frames > self.exit_confirm_frames:
+                    self._go("bypass"); return "raw"
+            else:
+                self.contrary_frames = 0
             if score > 0.7 and div < 0.1 and self.frames > 30:
                 self._go("active"); self._ramp(True)
                 return self._out("aec")
@@ -107,10 +116,16 @@ class FSM:
         if s == "active":
             if self.active_silence_grace > 0 and self.silent_frames > self.active_silence_grace:
                 self._go("bypass"); self._ramp(False); return self._out("raw")
-            if render_active and (score < 0.35 or div > 0.2):
+            if div > 0.2:
+                self.contrary_frames = 0
                 self._go("degraded"); self._ramp(False); return self._out("raw")
-            if not render_active and div > 0.2:
-                self._go("degraded"); self._ramp(False); return self._out("raw")
+            if render_active and score < 0.35:
+                self.contrary_frames += 1
+                if (self.contrary_frames > self.exit_confirm_frames
+                        and self.frames > self.active_min_dwell_frames):
+                    self._go("degraded"); self._ramp(False); return self._out("raw")
+            else:
+                self.contrary_frames = 0
             return self._out("aec")
         if s == "degraded":
             if self.frames > 50:
@@ -314,6 +329,64 @@ def test_scenario_6_pause_in_far_end_does_not_drop_processing():
     assert set(states[silent]) == {"active"}
     # And no source switching either.
     assert set(outputs[silent]) == {"aec"}
+
+
+# --------------------------------------------------- D-022: no state flapping
+def test_scenario_8_marginal_coupling_does_not_flap_between_states():
+    """The reported bug: the badge cycles probing -> learning -> active
+    continuously, with the audio changing source each time.
+
+    Marginal acoustic coupling (a weak echo path, like a quiet room or a low
+    speaker volume) puts the coupling score right on top of the FSM thresholds.
+    Measured with the REAL AEC at echo gain 0.06: the score spends 16% of frames
+    within 0.08 of activeEnter=0.7 and 26% within 0.08 of activeExit=0.35. The
+    FSM used to judge each frame independently, so it crossed those boundaries
+    over and over (18 state changes in 20 s before D-022).
+    """
+    render = speech_like(20.0, seed=31)
+    ir = room_ir(int(0.012 * SR), gain=0.06)
+    mic = (speech_like(20.0, seed=32, burst_hz=0.6) * 0.3 + echo_of(render, ir)).astype(np.float32)
+
+    out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic)
+    changes = sum(1 for a, b in zip(states, states[1:]) if a != b)
+    print(f"S8: {changes} state changes in 20 s, states {sorted(set(states))}")
+    assert changes <= 6, f"state flapping: {changes} changes in 20 s"
+
+    # What the user actually hears is the output source chattering.
+    src_changes = sum(1 for a, b in zip(outputs, outputs[1:]) if a != b)
+    print(f"S8: output source changes {src_changes}")
+    assert src_changes <= 8
+
+
+def test_scenario_9_sustained_coupling_loss_still_leaves_active():
+    """The confirm window must not defeat the safety rule it guards: when the
+    speakers really stop reaching the mic (headphones plugged in mid-call),
+    ACTIVE must still end.
+
+    The cost of D-022 is latency, and it is bounded: exitConfirmFrames is 2 s, so
+    allow 2 s of confirmation plus a settling second before demanding the state
+    is gone. Bleed is briefly audible during that window, which is the accepted
+    trade for not flapping on every marginal dip.
+    """
+    render = speech_like(20.0, seed=23)
+    ir = room_ir(int(0.03 * SR), gain=0.5)
+    mic = echo_of(render, ir).astype(np.float32)
+    # Halfway through, the echo disappears and only the user's voice remains.
+    half = 7 * SR
+    mic[half:] = (speech_like(20.0, seed=24) * 0.5)[half:]
+
+    out, cleaned, states, outputs, fsm, stats = run_pipeline(render, mic)
+    assert "active" in states[: half // FRAME], "should have engaged before the loss"
+    settle = (half // FRAME) + 300          # 3 s after the loss
+    tail = states[settle:]
+    print(f"S9: states 3 s after the loss {sorted(set(tail))}")
+    assert "active" not in tail, "must leave ACTIVE when coupling is really gone"
+
+    # How long did it actually take? Reported so the trade-off stays visible.
+    after = states[half // FRAME:]
+    left = next((i for i, s in enumerate(after) if s != "active"), None)
+    assert left is not None
+    print(f"S9: left ACTIVE {left * 10} ms after the echo disappeared")
 
 
 def test_scenario_7_switching_source_does_not_shift_the_timeline():

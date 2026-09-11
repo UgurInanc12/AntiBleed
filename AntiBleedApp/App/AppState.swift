@@ -40,6 +40,10 @@ final class AppState: ObservableObject {
     /// True while processing is suspended because the selected reference output
     /// is not the current macOS output (D-020). The pipeline resumes by itself.
     @Published var isPausedForOutputRoute = false
+    /// Driver install state, refreshed with the device list so the menu bar can
+    /// offer a one-click install instead of a shell command (D-023).
+    @Published var driverStatus: DriverInstaller.Status = .notInstalled
+    @Published var isInstallingDriver = false
 
     let deviceManager = DeviceManager()
     let permissions = Permissions()
@@ -125,6 +129,17 @@ final class AppState: ObservableObject {
     @discardableResult
     func adoptSystemDefaultsIfNeeded() -> Bool {
         var changed = false
+        // A stale selection pointing at one of our own devices (an old capture
+        // aggregate UID that no longer exists, or the virtual mic itself) would
+        // fail forever with "not found". Drop it and re-resolve (D-022).
+        if selectedMicUID.hasPrefix(DeviceManager.ownDeviceUIDPrefix) {
+            selectedMicUID = ""
+            changed = true
+        }
+        if selectedOutputUID.hasPrefix(DeviceManager.ownDeviceUIDPrefix) {
+            selectedOutputUID = ""
+            changed = true
+        }
         if selectedMicUID.isEmpty, let def = deviceManager.defaultInputUID, !def.isEmpty {
             selectedMicUID = def
             changed = true
@@ -173,6 +188,33 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Installs the driver bundled in the app and restarts the pipeline once
+    /// Core Audio has published the new devices (D-023).
+    func installDriver() {
+        guard !isInstallingDriver else { return }
+        isInstallingDriver = true
+        lastError = nil
+        Task { @MainActor in
+            defer { isInstallingDriver = false }
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try DriverInstaller.install()
+                }.value
+            } catch {
+                lastError = error.localizedDescription
+                driverStatus = DriverInstaller.status()
+                return
+            }
+            // coreaudiod needs a moment to republish the device list.
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            deviceManager.refresh()
+            driverStatus = DriverInstaller.status()
+            // Pick up the now-present writer: without a restart the pipeline keeps
+            // running with no destination for the cleaned audio.
+            if isRunning { restart() }
+        }
+    }
+
     func stop() {
         pipeline.stop()
         isRunning = false
@@ -211,6 +253,7 @@ final class AppState: ObservableObject {
         }
         // Fresh install: nothing persisted, so adopt whatever macOS is using.
         adoptSystemDefaultsIfNeeded()
+        driverStatus = DriverInstaller.status()
         // Autostart fires here rather than on a timer, because this is the first
         // point at which the device list (and therefore the defaults) is known.
         if autoStart && !isRunning && !hasAutoStarted && !selectedMicUID.isEmpty {

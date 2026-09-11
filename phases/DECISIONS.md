@@ -130,6 +130,28 @@ Newest decision at the bottom. Never delete entries; supersede with a new one.
 - Decision: The detector keeps a 650 ms history decimated 8x (6 kHz), correlates a 400 ms window over 0 to 250 ms of lag (1 ms steps), narrows to +-15 ms around the AEC3 delay estimate once available, and weights correlation 0.45, ERLE 0.35, lag stability 0.20, multiplied by AEC health. Evaluated every 100 ms.
 - Consequence: Measured 0.94 correlation at the true 45 ms lag with score 1.0 on the coupled case and score 0.0 on the headphones case, using the real AEC3 output statistics. Swift and Python mirrors must stay in sync (`AntiBleedApp/Core/CouplingDetector.swift`, `Tests/dsp/coupling_detector.py`).
 
+## D-022: Confirmation windows, honest driver detection, and a stale ERLE gate
+
+- Status: ACCEPTED
+- Symptom: on the first real Mac build the badge cycled `probing -> learning -> active` continuously, and the app reported "Virtual microphone driver not installed" even where the driver was in place.
+- Cause 1 (flapping): the FSM judged every 10 ms frame independently. With marginal acoustic coupling the ensemble score sits on top of the decision thresholds. Measured through the real AEC at echo gain 0.06: the score spends 16% of frames within 0.08 of `activeEnter=0.7` and 26% within 0.08 of `activeExit=0.35`, and its dips below the exit threshold last up to 1600 ms. Result: 18 state changes in 20 s, each one an audible source switch.
+- Fix 1: `exitConfirmFrames = 200` (2 s) of sustained contrary evidence before ACTIVE or LEARNING is abandoned, plus `activeMinDwellFrames = 100` (1 s) minimum dwell in ACTIVE. Any frame of good evidence resets the counter. Divergence is exempt and still fires immediately, because it is a real fault rather than a noisy estimate. Measured after the change: 18 state changes -> 3, output source changes -> 2.
+- Cost: a genuine coupling loss now takes ~2.8 s to leave ACTIVE (measured, `test_scenario_9`) instead of one frame. Speaker bleed is briefly audible in that window. Accepted: constant flapping was worse, and the headphones case is handled at the app level by the output-route check (D-020) which does not wait.
+- Cause 2 (stale ERLE): AEC3 freezes its last ERLE when the echo path disappears. Measured: 37.2 dB reported for 6+ s after the echo was gone, while correlation correctly collapsed to 0.07. The ungated 0.35 ERLE weight alone pinned the score at exactly 0.35 = `activeExitScore`, so ACTIVE could never be released by coupling loss at all.
+- Fix 2: the ERLE term is gated on real correlation evidence (`erleGate` ramps over `correlationThreshold * 0.5`). ERLE confirms correlation; it can never substitute for it. Score after the echo disappears: 0.55 (frozen, above the exit threshold) -> 0.20.
+- Cause 3 (driver detection): `virtualWriterPresent` was resolved by scanning `kAudioHardwarePropertyDevices`. The writer is deliberately hidden (D-005), and Apple's `AudioHardwareBase.h` states hidden devices are "not included in the normal list of devices provided by kAudioHardwarePropertyDevices". The check could therefore never succeed.
+- Fix 3: presence is resolved with `kAudioHardwarePropertyTranslateUIDToDevice`, which does find hidden devices. Additionally every `com.antibleed.` UID is filtered out of the pickers, and a persisted selection pointing at one of our own devices (a stale capture-aggregate UID) is dropped and re-resolved, which is the "Microphone com.antibleed.aggregate.<UUID> not found" error.
+- Verification: 96 Python and 59 Swift tests green. `test_scenario_8` locks the transition count, `test_scenario_9` locks that a real loss still ends ACTIVE and prints the latency.
+
+## D-023: The app installs its own driver
+
+- Status: ACCEPTED
+- Decision: `DriverInstaller` copies the driver bundled at `AntiBleed.app/Contents/Library/Audio/Plug-Ins/HAL/AntiBleed.driver` into `/Library/Audio/Plug-Ins/HAL/` and restarts `coreaudiod`, driven by an "Install virtual microphone" button in the menu bar. Telling a non-technical user to run `Scripts/install-driver.sh` in a terminal is not a shipping answer; the product promise is download, open, done.
+- Elevation: one `NSAppleScript` `do shell script ... with administrator privileges` call performs the replace, `chown`, `chmod` and daemon restart together, so macOS prompts for authentication exactly once. The password is typed into the system panel and never reaches the app.
+- TCC: the bundle is staged through `/tmp` first. With the app in `~/Desktop` or `~/Downloads` even a root shell is blocked from reading the user's folder, which is the `Operation not permitted (126)` failure reported from the first Mac build.
+- Version awareness: `CFBundleVersion` of the installed bundle is compared with the bundled one, so an outdated driver offers "Update driver" instead of silently mismatching the app.
+- Verification: NOT verified. This code cannot run on Windows; it needs the macOS checklist in Docs/Testing.md.
+
 ## D-021: Zero-configuration startup and a single app window
 
 - Status: ACCEPTED

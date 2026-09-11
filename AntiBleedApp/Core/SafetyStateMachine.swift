@@ -43,6 +43,17 @@ public final class SafetyStateMachine {
     public var degradedRecoverScore: Float = 0.65
     public var degradedTimeoutFrames: Int = 50       // 500 ms
     public var crossfadeFrames: Int = 10              // 100 ms
+    /// Consecutive frames of contrary evidence required before ACTIVE or LEARNING
+    /// is abandoned (D-022). Measured on a quiet room (speakers -59 dBFS, mic
+    /// -84 dBFS): the coupling score swings across the decision thresholds, with
+    /// 32% of samples within 0.05 of activeEnter and 17% within 0.05 of
+    /// activeExit. Judging a single frame made the badge cycle
+    /// probing -> learning -> active continuously. Evidence must persist.
+    public var exitConfirmFrames: Int = 200           // 2 s
+    /// Minimum time in ACTIVE before coupling may expel it. Prevents an
+    /// immediate bounce right after the climb, while divergence (a real fault)
+    /// is still allowed to fire at any moment.
+    public var activeMinDwellFrames: Int = 100        // 1 s
     /// How long ACTIVE survives a silent far end before falling back to raw
     /// (D-020). 0 means "never fall back on silence alone", which is the
     /// shipped behaviour: with no render to cancel the AEC is transparent
@@ -64,12 +75,16 @@ public final class SafetyStateMachine {
     private var rampDirectionToProcessed = true
     /// Consecutive frames with a silent far end. Reset by any render activity.
     private var silentFrames = 0
+    /// Consecutive frames of evidence against the current processed state
+    /// (D-022). Any frame of good evidence resets it, so only a sustained loss
+    /// of coupling leaves ACTIVE or aborts LEARNING.
+    private var contraryFrames = 0
 
     public init() {}
 
-    public func start() { transition(to: .bypass); ramp.reset(); silentFrames = 0 }
-    public func stop() { transition(to: .stopped); ramp.reset(); silentFrames = 0 }
-    public func fail() { transition(to: .error); ramp.reset(); silentFrames = 0 }
+    public func start() { transition(to: .bypass); ramp.reset(); silentFrames = 0; contraryFrames = 0 }
+    public func stop() { transition(to: .stopped); ramp.reset(); silentFrames = 0; contraryFrames = 0 }
+    public func fail() { transition(to: .error); ramp.reset(); silentFrames = 0; contraryFrames = 0 }
 
     public func reset() {
         transition(to: .bypass)
@@ -77,6 +92,7 @@ public final class SafetyStateMachine {
         aecDelayMs = nil
         ramp.reset()
         silentFrames = 0
+        contraryFrames = 0
     }
 
     /// Per 10 ms frame. Returns which signal to expose for this frame.
@@ -89,6 +105,7 @@ public final class SafetyStateMachine {
             transition(to: .bypass)
             ramp.reset()
             silentFrames = 0
+            contraryFrames = 0
             return .rawMic
         }
         couplingConfidence = coupling.score
@@ -142,8 +159,14 @@ public final class SafetyStateMachine {
             if silentFrames > learningSilenceGraceFrames {
                 transition(to: .bypass); return .rawMic
             }
+            // Sustained contrary evidence, not a single bad frame (D-022).
             if renderActivity.isActive && coupling.score < learningAbortScore {
-                transition(to: .bypass); return .rawMic
+                contraryFrames += 1
+                if contraryFrames > exitConfirmFrames {
+                    transition(to: .bypass); return .rawMic
+                }
+            } else {
+                contraryFrames = 0
             }
             if coupling.score > activeEnterScore
                 && aecStats.divergentFilterFraction < 0.1
@@ -164,19 +187,27 @@ public final class SafetyStateMachine {
                 beginRamp(toProcessed: false)
                 return rampedOutput(idle: .rawMic)
             }
-            // Coupling is only re-judged while the far end actually plays; during
-            // silence the score decays for lack of evidence, not for lack of an
-            // echo path.
-            if renderActivity.isActive
-                && (coupling.score < activeExitScore || aecStats.divergentFilterFraction > degradedDivergence) {
+            // Divergence is a real fault: act on it immediately, at any moment.
+            if aecStats.divergentFilterFraction > degradedDivergence {
+                contraryFrames = 0
                 transition(to: .degraded)
                 beginRamp(toProcessed: false)
                 return rampedOutput(idle: .rawMic)
             }
-            if !renderActivity.isActive && aecStats.divergentFilterFraction > degradedDivergence {
-                transition(to: .degraded)
-                beginRamp(toProcessed: false)
-                return rampedOutput(idle: .rawMic)
+            // Coupling is only re-judged while the far end actually plays; during
+            // silence the score decays for lack of evidence, not for lack of an
+            // echo path. A dip must persist (D-022): near the threshold the score
+            // swings frame to frame and single-frame judgement made the state
+            // oscillate audibly.
+            if renderActivity.isActive && coupling.score < activeExitScore {
+                contraryFrames += 1
+                if contraryFrames > exitConfirmFrames && framesInState > activeMinDwellFrames {
+                    transition(to: .degraded)
+                    beginRamp(toProcessed: false)
+                    return rampedOutput(idle: .rawMic)
+                }
+            } else {
+                contraryFrames = 0
             }
             return rampedOutput(idle: .aecProcessed)
 

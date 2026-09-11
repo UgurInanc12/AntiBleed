@@ -149,9 +149,14 @@ public final class CouplingDetector {
 
         let corrScore = min(1, max(0, (abs(best) - 0.2) / 0.5))
         let stabilityScore = min(1, max(0, Float(stableWindows) / Float(minStableWindows)))
-        // Weights: correlation is the primary evidence, ERLE confirms the AEC is
-        // really removing something, stability guards against transients.
-        let raw = (corrScore * 0.45 + erleScore * 0.35 + stabilityScore * 0.20) * (0.5 + 0.5 * aecHealth)
+        // ERLE CONFIRMS correlation, it can never replace it (D-022). When the
+        // echo path disappears (headphones) AEC3 keeps reporting the last ERLE it
+        // achieved: measured 37.2 dB frozen for 6+ s after the echo was gone,
+        // while correlation correctly collapsed to 0.07. Ungated, that stale term
+        // alone held the score at exactly 0.35 = activeExitScore, so ACTIVE could
+        // never be released. Gate it on real correlation evidence.
+        let erleGate = min(1, max(0, (abs(best) - correlationThreshold * 0.5) / (correlationThreshold * 0.5)))
+        let raw = (corrScore * 0.45 + erleScore * erleGate * 0.35 + stabilityScore * 0.20) * (0.5 + 0.5 * aecHealth)
         smoothedScore = 0.7 * smoothedScore + 0.3 * raw
 
         let delayMs = (aecStats.valid && aecStats.delayMs >= 0) ? aecStats.delayMs : peakLagMs

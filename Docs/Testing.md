@@ -9,7 +9,7 @@
 | DSP + FSM mirrors, fixtures | pytest (`Tests/test_*.py`) | yes | yes | yes |
 | Real AEC3 offline cases A-J | pytest + `build/aec/aec_offline` | yes | yes | yes |
 | 5 live scenarios (AEC3 + detector + FSM) | `Tests/test_pipeline_integration.py` | yes | yes | yes |
-| Swift core (engine, FSM, detector, sync, rings) | `swift test` (58 XCTest) | yes (`Scripts/swift-test-windows.cmd`) | yes | yes |
+| Swift core (engine, FSM, detector, sync, rings) | `swift test` (59 XCTest) | yes (`Scripts/swift-test-windows.cmd`) | yes | yes |
 | AECBridge sanity | `ctest` in `build/aec` | yes | yes | yes |
 | Driver ring policy | `ctest` in `build/driver` | yes | yes | yes |
 | HAL driver install, tap permission, Discord | manual + `Scripts/install-driver.sh` | no | no | **required** |
@@ -22,12 +22,12 @@
 env -u PYTHONPATH uv venv .venv && env -u PYTHONPATH uv pip install -r Tests/requirements.txt
 cmake -S AECBridge -B build/aec -G "Visual Studio 16 2019" -A x64 && cmake --build build/aec --config Release
 cmake -S AntiBleedDriver -B build/driver -G "Visual Studio 16 2019" -A x64 && cmake --build build/driver --config Release
-.venv/Scripts/pytest -q                      # 93 tests
+.venv/Scripts/pytest -q                      # 96 tests
 build/aec/Release/AECBridgeTests.exe          # AEC3 sanity
 build/driver/Release/SharedRingBufferTests.exe
 
 # Swift core (Windows, winget Swift 6.3 + VS2019 Build Tools + Windows SDK 10.0.22621)
-Scripts/swift-test-windows.cmd                # 58 tests
+Scripts/swift-test-windows.cmd                # 59 tests
 
 # macOS: everything
 Scripts/bootstrap-macos.sh && Scripts/build-app.sh release
@@ -89,6 +89,17 @@ Acceptance: bleed reduced by >= 15 dB on speakers; headphones stay in BYPASS; do
       to `Bypass` with "Raw microphone: output is not ...", and the peer KEEPS HEARING YOU
       (the mic must not go silent); switch back to the speakers -> bleed removal re-engages
       on its own without user action.
+- [ ] D-022 no flapping: play music through the speakers at a NORMAL, quiet-ish volume
+      (the marginal-coupling case) and watch the badge for a minute. It must settle and
+      stay, not cycle probing -> learning -> active. Diagnostics -> Recent transitions
+      should gain only a handful of entries, not a stream.
+- [ ] D-022 driver detection: with the driver installed, the menu bar must NOT claim it is
+      missing, and Diagnostics -> Driver must read `installed`. The mic picker must not
+      list any `Anti-Bleed` device.
+- [ ] D-023 self-install: on a Mac with no driver, the menu bar shows "Install virtual
+      microphone". Click it -> macOS asks for the password ONCE -> within a few seconds
+      `Anti-Bleed_mic` appears in System Settings -> Sound and in Discord's input list,
+      with no terminal involved. Test this with the app in ~/Downloads too (TCC path).
 - [ ] D-021 first run: delete `~/Library/Preferences/com.antibleed.app.plist`, launch -> the
       pickers already show the system default mic/speakers and processing starts on its own,
       with no Start press. Reboot -> the app comes back by itself (login item).
